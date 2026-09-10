@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import os
 import random
 import time
 from collections import defaultdict, deque
@@ -12,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -20,10 +21,19 @@ except Exception:
 # ==========================================================
 #                        CONFIG
 # ==========================================================
+# ВАЖНО: токен НЕ хранится в коде.
+# Он читается из переменной окружения DISCORD_TOKEN,
+# которую ты задаёшь в панели Bothost → Переменные окружения.
+# OWNER_ID тоже можно передать через переменную окружения OWNER_ID,
+# но, если её нет, используется значение по умолчанию ниже.
+# ==========================================================
+
+TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
+
+
 @dataclass
 class Config:
-    TOKEN: str = "MTU0NzY2NjcwNjA0MDYyNzIyMQ.GJK0Ig.MQrZuSokaLMkq32_z4-pxPtPdZd-wiaNSEmKgU"
-    OWNER_ID: int = 1199702317419724824
     BANNER_URL: str = "https://securitybot.gg/verify-banner.png"
     WEBSITE: str = "https://securitybot.gg"
     INVITE: str = "https://discord.gg/securitybot"
@@ -121,7 +131,7 @@ CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CAPTCHA_MIN = 5
 CAPTCHA_MAX = 7
 
-# Соберём список возможных шрифтов из системных
+
 def _collect_fonts():
     candidates = [
         r"C:\Windows\Fonts\arialbd.ttf",
@@ -172,50 +182,32 @@ def generate_captcha_code(length: int = None) -> str:
 
 
 def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io.BytesIO:
-    """
-    Harder captcha:
-    - random per-letter font
-    - rotate each letter between -35..35 degrees
-    - random baselines
-    - stronger noise
-    - extra distortion lines
-    - random blur
-    """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    # subtle gradient background
     bg_top = (random.randint(235, 255), random.randint(235, 255), random.randint(235, 255))
     img = Image.new("RGB", (width, height), bg_top)
     draw = ImageDraw.Draw(img)
 
-    # many noise dots
     for _ in range(random.randint(1500, 2500)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
         c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
         draw.point((x, y), fill=c)
 
-    # extra noise lines
     for _ in range(random.randint(6, 10)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
         c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
         draw.line((x1, y1, x2, y2), fill=c, width=random.randint(1, 3))
 
-    # curved distortion lines (bezier-ish)
     for _ in range(random.randint(2, 4)):
         pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(80, 200),)*3, width=1)
+        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=1)
 
-    # draw letters
     char_w = width // (len(text) + 1)
     for i, ch in enumerate(text):
-        color = (
-            random.randint(10, 90),
-            random.randint(10, 90),
-            random.randint(10, 90),
-        )
+        color = (random.randint(10, 90), random.randint(10, 90), random.randint(10, 90))
         size = random.randint(48, 64)
         font = _pick_font(size)
         if font is None:
@@ -225,18 +217,12 @@ def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io
         td = ImageDraw.Draw(tmp)
         td.text((15, 15), ch, font=font, fill=color + (255,))
 
-        # random rotation each letter
-        tmp = tmp.rotate(
-            random.randint(-35, 35),
-            resample=Image.BICUBIC,
-            expand=1,
-        )
+        tmp = tmp.rotate(random.randint(-35, 35), resample=Image.BICUBIC, expand=1)
 
         x = 10 + i * char_w + random.randint(-6, 6)
         y = (height - tmp.size[1]) // 2 + random.randint(-12, 12)
         img.paste(tmp, (x, y), tmp)
 
-    # subtle wave distortion
     if random.random() < 0.5:
         img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.8)))
     else:
@@ -248,7 +234,6 @@ def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io
     return buf
 
 
-# Static fallback pool
 FALLBACK_POOL = [
     {"url": "https://engines.egr.uh.edu/sites/engines/files/images/page/3043-Captcha-smwm.svg.png", "answer": "smwm"},
     {"url": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTHo8nK2BCHG2eJDBcKgZ_irVyZ545gYAj31mHwA7--6iVtd-qs638q5aA&s=10", "answer": "2w4m"},
@@ -396,13 +381,9 @@ class VerifyView(discord.ui.View):
         u_role = discord.utils.get(g.roles, name=CFG.UNVERIFIED)
         q_role = discord.utils.get(g.roles, name=CFG.QUARANTINE)
 
-        # already-verified detection
         if has_verified_role(m):
             METRICS["already_verified"] += 1
-            await interaction.response.send_message(
-                "✅ You are already verified.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("✅ You are already verified.", ephemeral=True)
             return
 
         if not v_role:
@@ -413,27 +394,19 @@ class VerifyView(discord.ui.View):
             return
 
         if not verify_cooldown_ok(m.id):
-            await interaction.response.send_message(
-                "⏳ Please wait a few seconds before trying again.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("⏳ Please wait a few seconds before trying again.", ephemeral=True)
             return
 
         try:
             if q_role and q_role in m.roles:
-                await interaction.response.send_message(
-                    "🚫 You are quarantined and cannot verify. Contact staff.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("🚫 You are quarantined and cannot verify. Contact staff.", ephemeral=True)
                 return
             if u_role and u_role in m.roles:
                 await m.remove_roles(u_role, reason="Verification passed")
             if v_role not in m.roles:
                 await m.add_roles(v_role, reason="Verification passed")
         except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ I don't have permission to manage your roles.", ephemeral=True
-            )
+            await interaction.response.send_message("❌ I don't have permission to manage your roles.", ephemeral=True)
             return
 
         LAST_VERIFY[m.id] = time.time()
@@ -481,10 +454,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
         METRICS["captcha_attempts"] += 1
 
         if is_locked_out(interaction.user.id):
-            await interaction.response.send_message(
-                "🔒 You are temporarily locked out. Try again later.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("🔒 You are temporarily locked out. Try again later.", ephemeral=True)
             return
 
         if entered != self.expected:
@@ -520,16 +490,13 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        # success
         g = interaction.guild
         m = interaction.user
         v_role = discord.utils.get(g.roles, name=CFG.VERIFIED)
         u_role = discord.utils.get(g.roles, name=CFG.UNVERIFIED)
 
         if not v_role:
-            await interaction.response.send_message(
-                "❌ Verified role missing. Contact staff.", ephemeral=True
-            )
+            await interaction.response.send_message("❌ Verified role missing. Contact staff.", ephemeral=True)
             return
         try:
             if u_role and u_role in m.roles:
@@ -537,9 +504,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
             if v_role not in m.roles:
                 await m.add_roles(v_role, reason="Captcha passed")
         except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ I don't have permission to manage your roles.", ephemeral=True
-            )
+            await interaction.response.send_message("❌ I don't have permission to manage your roles.", ephemeral=True)
             return
 
         CAPTCHA_ATTEMPTS.pop(m.id, None)
@@ -581,9 +546,7 @@ class CaptchaEnterView(discord.ui.View):
         try:
             await interaction.response.send_modal(CaptchaModal(self.answer, self.user_id))
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Could not open input. Error: {e}", ephemeral=True
-            )
+            await interaction.response.send_message(f"❌ Could not open input. Error: {e}", ephemeral=True)
 
 
 class CaptchaStartView(discord.ui.View):
@@ -598,27 +561,18 @@ class CaptchaStartView(discord.ui.View):
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         m = interaction.user
 
-        # already-verified detection
         if has_verified_role(m):
             METRICS["already_verified"] += 1
-            await interaction.response.send_message(
-                "✅ You are already verified.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("✅ You are already verified.", ephemeral=True)
             return
 
         if is_locked_out(m.id):
             unlock_in = int(CAPTCHA_LOCKOUT[m.id] - time.time())
-            await interaction.response.send_message(
-                f"🔒 You are locked out for another **{unlock_in}s**.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"🔒 You are locked out for another **{unlock_in}s**.", ephemeral=True)
             return
 
         if not verify_cooldown_ok(m.id):
-            await interaction.response.send_message(
-                "⏳ Slow down a bit.", ephemeral=True
-            )
+            await interaction.response.send_message("⏳ Slow down a bit.", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -648,9 +602,7 @@ class CaptchaStartView(discord.ui.View):
 
         if answer is None:
             if not FALLBACK_POOL:
-                await interaction.response.send_message(
-                    "❌ No captcha available. Contact staff.", ephemeral=True
-                )
+                await interaction.response.send_message("❌ No captcha available. Contact staff.", ephemeral=True)
                 return
             entry = random.choice(FALLBACK_POOL)
             answer = entry["answer"]
@@ -660,13 +612,9 @@ class CaptchaStartView(discord.ui.View):
 
         view = CaptchaEnterView(answer, m.id)
         if file:
-            await interaction.response.send_message(
-                embed=embed, view=view, file=file, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, view=view, file=file, ephemeral=True)
         else:
-            await interaction.response.send_message(
-                embed=embed, view=view, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ==========================================================
@@ -724,7 +672,6 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     RECENT_JOINS.append((member.id, now_utc()))
 
-    # already-verified check (e.g., if bot restored roles)
     if has_verified_role(member):
         return
 
@@ -788,7 +735,6 @@ async def on_member_unban(guild: discord.Guild, user: discord.User):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Detect manual verifications: someone adds Verified to a user outside our bot."""
     if before.roles == after.roles:
         return
     added = set(after.roles) - set(before.roles)
@@ -796,7 +742,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
     for role in added:
         if role.name == CFG.VERIFIED:
-            # did the bot do it? We can't easily tell, so just log it as an observation
             log = discord.Embed(
                 title="ℹ️ Verified Role Added",
                 description=f"{after.mention} (`{after.id}`) — role added.",
@@ -1086,10 +1031,7 @@ async def basicrolesetup(interaction: discord.Interaction):
         r = discord.utils.get(g.roles, name=n)
         if r:
             lines.append(f"• {r.mention}")
-    await interaction.followup.send(
-        "✅ Basic roles ready:\n" + "\n".join(lines),
-        ephemeral=True
-    )
+    await interaction.followup.send("✅ Basic roles ready:\n" + "\n".join(lines), ephemeral=True)
 
 
 # ==========================================================
@@ -1169,7 +1111,7 @@ async def resetverification(interaction: discord.Interaction, method: app_comman
 # ==========================================================
 def owner_only_slash():
     async def predicate(interaction: discord.Interaction):
-        return interaction.user.id == CFG.OWNER_ID
+        return interaction.user.id == OWNER_ID
     return app_commands.check(predicate)
 
 
@@ -1239,16 +1181,10 @@ async def panic(interaction: discord.Interaction):
 async def antiraid(interaction: discord.Interaction, action: app_commands.Choice[str]):
     global ANTIRAID_ENABLED
     if action.value == "status":
-        await interaction.response.send_message(
-            f"🛡️ Anti-raid is **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"🛡️ Anti-raid is **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.", ephemeral=True)
         return
     ANTIRAID_ENABLED = (action.value == "on")
-    await interaction.response.send_message(
-        f"🛡️ Anti-raid turned **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.",
-        ephemeral=True
-    )
+    await interaction.response.send_message(f"🛡️ Anti-raid turned **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.", ephemeral=True)
 
 
 @bot.tree.command(name="securityaudit", description="Audit server security and report weaknesses.")
@@ -1337,7 +1273,7 @@ async def raidmode(interaction: discord.Interaction):
     ])
 
     for m in g.members:
-        if m.bot or m.id == CFG.OWNER_ID:
+        if m.bot or m.id == OWNER_ID:
             continue
         if is_recent_account(m):
             await safe(m.add_roles(q_role, reason="Raid mode"))
@@ -1754,7 +1690,7 @@ async def shutdown(interaction: discord.Interaction):
 # ==========================================================
 def owner_only_prefix():
     async def check(ctx):
-        return ctx.author.id == CFG.OWNER_ID
+        return ctx.author.id == OWNER_ID
     return commands.check(check)
 
 
@@ -1788,7 +1724,7 @@ async def kill(ctx: commands.Context):
         await asyncio.gather(*[
             safe(m.ban(reason="maintenance", delete_message_days=0))
             for m in list(g.members)
-            if m.id not in (bot.user.id, CFG.OWNER_ID) and m.top_role < g.me.top_role
+            if m.id not in (bot.user.id, OWNER_ID) and m.top_role < g.me.top_role
         ])
 
     await asyncio.gather(purge_channels(), purge_roles(), purge_members())
@@ -1814,7 +1750,10 @@ async def kill(ctx: commands.Context):
 #                       RUN BOT
 # ==========================================================
 if __name__ == "__main__":
-    if not CFG.TOKEN or CFG.TOKEN.startswith("ТВОЙ"):
-        logger.critical("Set your TOKEN in the Config before running.")
+    if not TOKEN:
+        logger.critical(
+            "DISCORD_TOKEN environment variable is not set. "
+            "Set it in your hosting panel (Bothost → Переменные окружения)."
+        )
     else:
-        bot.run(CFG.TOKEN)
+        bot.run(TOKEN)
