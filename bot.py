@@ -1,3 +1,34 @@
+import subprocess
+import sys
+import importlib
+
+# ==========================================================
+#              АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# ==========================================================
+def _ensure(pkg, import_name=None):
+    import_name = import_name or pkg
+    try:
+        importlib.import_module(import_name)
+        return
+    except ImportError:
+        pass
+    for args in (
+        [sys.executable, "-m", "pip", "install", "--user", pkg],
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", pkg],
+        [sys.executable, "-m", "pip", "install", pkg],
+    ):
+        try:
+            subprocess.check_call(args)
+            return
+        except Exception as e:
+            print(f"[AUTOINSTALL try failed] {args}: {e}")
+
+_ensure("discord.py", "discord")
+_ensure("Pillow", "PIL")
+
+# ==========================================================
+#                     ОСНОВНЫЕ ИМПОРТЫ
+# ==========================================================
 import asyncio
 import io
 import logging
@@ -13,21 +44,15 @@ from discord import app_commands
 from discord.ext import commands
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
 
+
 # ==========================================================
 #                        CONFIG
 # ==========================================================
-# ВАЖНО: токен НЕ хранится в коде.
-# Он читается из переменной окружения DISCORD_TOKEN,
-# которую ты задаёшь в панели Bothost → Переменные окружения.
-# OWNER_ID тоже можно передать через переменную окружения OWNER_ID,
-# но, если её нет, используется значение по умолчанию ниже.
-# ==========================================================
-
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
 
@@ -58,6 +83,7 @@ class Config:
 
 CFG = Config()
 
+
 # ==========================================================
 #                        LOGGING
 # ==========================================================
@@ -70,6 +96,7 @@ _sh = logging.StreamHandler()
 _sh.setFormatter(_fmt)
 logger.addHandler(_fh)
 logger.addHandler(_sh)
+
 
 # ==========================================================
 #                         BOT
@@ -129,32 +156,33 @@ def ts(dt: datetime, style: str = "R") -> str:
 # ==========================================================
 CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CAPTCHA_MIN = 5
-CAPTCHA_MAX = 7
+CAPTCHA_MAX = 5
 
 
 def _collect_fonts():
-    candidates = [
+    here = os.path.dirname(os.path.abspath(__file__))
+    local = [
+        os.path.join(here, "DejaVuSans-Bold.ttf"),
+        os.path.join(here, "Roboto-Bold.ttf"),
+    ]
+    system = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         r"C:\Windows\Fonts\arialbd.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
         r"C:\Windows\Fonts\segoeuib.ttf",
-        r"C:\Windows\Fonts\verdana.ttf",
+        r"C:\Windows\Fonts\verdanab.ttf",
         r"C:\Windows\Fonts\calibrib.ttf",
         r"C:\Windows\Fonts\tahomabd.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Verdana.ttf",
     ]
     found = []
     if not HAS_PIL:
         return found
-    for p in candidates:
+    for p in local + system:
         try:
             ImageFont.truetype(p, 20)
             found.append(p)
+            logger.info(f"[FONT OK] {p}")
         except Exception:
             continue
     return found
@@ -182,51 +210,53 @@ def generate_captcha_code(length: int = None) -> str:
 
 
 def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io.BytesIO:
+    """
+    Readable captcha: light noise, mild rotation, no blur.
+    Humans read it instantly; simple OCR still struggles a bit.
+    """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    bg_top = (random.randint(235, 255), random.randint(235, 255), random.randint(235, 255))
-    img = Image.new("RGB", (width, height), bg_top)
+    bg = (random.randint(245, 255), random.randint(245, 255), random.randint(245, 255))
+    img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
 
-    for _ in range(random.randint(1500, 2500)):
+    # light noise dots
+    for _ in range(random.randint(300, 600)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
-        c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
+        c = (random.randint(180, 230), random.randint(180, 230), random.randint(180, 230))
         draw.point((x, y), fill=c)
 
-    for _ in range(random.randint(6, 10)):
+    # 2-3 faint straight lines
+    for _ in range(random.randint(2, 3)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
-        c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
-        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(1, 3))
+        c = (random.randint(150, 200), random.randint(150, 200), random.randint(150, 200))
+        draw.line((x1, y1, x2, y2), fill=c, width=1)
 
-    for _ in range(random.randint(2, 4)):
-        pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=1)
-
+    # big dark letters, mild rotation
     char_w = width // (len(text) + 1)
     for i, ch in enumerate(text):
-        color = (random.randint(10, 90), random.randint(10, 90), random.randint(10, 90))
-        size = random.randint(48, 64)
+        color = (
+            random.randint(10, 60),
+            random.randint(10, 60),
+            random.randint(10, 60),
+        )
+        size = random.randint(56, 64)
         font = _pick_font(size)
         if font is None:
             continue
 
-        tmp = Image.new("RGBA", (size + 30, size + 30), (0, 0, 0, 0))
+        tmp = Image.new("RGBA", (size + 40, size + 40), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
-        td.text((15, 15), ch, font=font, fill=color + (255,))
+        td.text((20, 20), ch, font=font, fill=color + (255,))
 
-        tmp = tmp.rotate(random.randint(-35, 35), resample=Image.BICUBIC, expand=1)
+        tmp = tmp.rotate(random.randint(-12, 12), resample=Image.BICUBIC, expand=1)
 
-        x = 10 + i * char_w + random.randint(-6, 6)
-        y = (height - tmp.size[1]) // 2 + random.randint(-12, 12)
+        x = 14 + i * char_w + random.randint(-3, 3)
+        y = (height - tmp.size[1]) // 2 + random.randint(-4, 4)
         img.paste(tmp, (x, y), tmp)
-
-    if random.random() < 0.5:
-        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.8)))
-    else:
-        img = img.filter(ImageFilter.SMOOTH)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
