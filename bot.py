@@ -61,7 +61,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
 @dataclass
 class Config:
     BANNER_URL: str = "https://securitybot.gg/verify-banner.png"
-    WEBSITE: str = "https://securitybot.gg"
+    WEBSITE: str = "https://dcsecurity.fun"
     INVITE: str = "https://discord.gg/securitybot"
     LOG_FILE: str = "bot.log"
     STRIKES_FILE: str = "strikes.json"
@@ -741,7 +741,7 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(CaptchaStartView())
     await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="/help | securitybot.gg"),
+        activity=discord.Activity(type=discord.ActivityType.watching, name="/help | dcsecurity.fun"),
         status=discord.Status.online,
     )
     if not hasattr(bot, "uptime"):
@@ -769,7 +769,7 @@ async def on_guild_join(guild: discord.Guild):
             title="🛡️ SecurityBot is now protecting this server",
             description=(
                 "Thanks for adding **SecurityBot**.\n\n"
-                "• Run `/basicsetup` to bootstrap roles + channels\n"
+                "• Run `/basicsetup` to bootstrap roles + channels + Community\n"
                 "• Run `/basicsetup method:Captcha` for captcha verification\n"
                 "• Run `/help` for all commands\n\n"
                 f"🌐 {CFG.WEBSITE}"
@@ -933,7 +933,7 @@ async def invite_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="website", description="Show the official website.")
 async def website_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🌐 securitybot.gg",
+        title="🌐 dcsecurity.fun",
         description=f"Visit us at **{CFG.WEBSITE}**.",
         color=discord.Color.from_rgb(30, 60, 130),
         timestamp=now_utc(),
@@ -1000,7 +1000,7 @@ async def setupverification(interaction: discord.Interaction, method: app_comman
         await interaction.followup.send("❌ Failed to create verification channel.", ephemeral=True)
 
 
-@bot.tree.command(name="basicsetup", description="Wipe ALL channels and rebuild a full server structure.")
+@bot.tree.command(name="basicsetup", description="Wipe ALL channels, rebuild structure, enable Community Server.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 @app_commands.describe(method="Verification method")
@@ -1013,8 +1013,11 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     g = interaction.guild
     chosen = method.value if method else "button"
 
-    await asyncio.gather(*[safe(ch.delete(reason="Basic setup reset")) for ch in list(g.channels)])
+    # ---------- 1. WIPE ALL CHANNELS ----------
+    for ch in list(g.channels):
+        await safe(ch.delete(reason="Basic setup reset"))
 
+    # ---------- 2. ROLES ----------
     owner_role = await find_or_create_role(g, "👑 Owner", discord.Color.gold(), hoist=True, permissions=discord.Permissions.all())
     admin_role = await find_or_create_role(g, "🛡️ Administrator", discord.Color.red(), hoist=True, permissions=discord.Permissions(administrator=True))
     mod_role = await find_or_create_role(g, "🔨 Moderator", discord.Color.blue(), hoist=True, permissions=discord.Permissions(
@@ -1031,58 +1034,110 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     except Exception:
         pass
 
+    # ---------- 3. RULES + MOD CHANNELS FIRST (needed for Community) ----------
+    rules_cat = await safe(g.create_category("📜 INFORMATION"))
+    rules_ch = await safe(g.create_text_channel(
+        "📜・rules", category=rules_cat,
+        topic="Server rules and guidelines.",
+        overwrites={
+            g.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+        }
+    ))
+
+    staff_cat = await safe(g.create_category("🛡️ STAFF"))
+    staff_overwrites = {
+        g.default_role: discord.PermissionOverwrite(view_channel=False),
+        admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    mod_ch = await safe(g.create_text_channel(
+        "💼・staff-chat", category=staff_cat,
+        overwrites=staff_overwrites,
+        topic="Moderator-only channel.",
+    ))
+
+    # ---------- 4. ENABLE COMMUNITY ----------
+    community_enabled = False
+    community_error = ""
+    try:
+        await g.edit(
+            community=True,
+            rules_channel=rules_ch,
+            public_updates_channel=mod_ch,
+            reason="Basic setup: enable Community",
+        )
+        community_enabled = True
+        logger.info(f"[COMMUNITY] Enabled on {g.name} ({g.id})")
+    except discord.HTTPException as e:
+        community_error = str(e)
+        logger.warning(f"[COMMUNITY] Failed: {e}")
+        try:
+            await g.edit(community=True, rules_channel=rules_ch, reason="Basic setup: Community retry")
+            community_enabled = True
+        except Exception as e2:
+            community_error = str(e2)
+            logger.warning(f"[COMMUNITY] Retry failed: {e2}")
+
+    # ---------- 5. VERIFICATION CATEGORY + CHANNEL ----------
+    verify_cat = await safe(g.create_category(CFG.VERIFY_CATEGORY))
+    verify_ch = await safe(g.create_text_channel(
+        CFG.VERIFY_CHANNEL, category=verify_cat,
+        overwrites={
+            g.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+            v_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        },
+        topic="Verify to gain access to the server.",
+    ))
+
+    # ---------- 6. FULL STRUCTURE ----------
     structure = [
-        (CFG.VERIFY_CATEGORY, [(CFG.VERIFY_CHANNEL, "text")]),
-        ("📢 INFORMATION", [
-            ("👋・welcome", "text"),
-            ("📣・announcements", "text"),
-            ("📜・rules", "text"),
-            ("🎭・roles", "text"),
+        ("📢 ANNOUNCEMENTS", [
+            ("📣・announcements", "text", True),
+            ("🎉・events", "text", True),
         ]),
         ("💬 GENERAL", [
-            ("💬・general-chat", "text"),
-            ("🖼️・media", "text"),
-            ("🤖・bot-commands", "text"),
+            ("💬・general-chat", "text", False),
+            ("🖼️・media", "text", False),
+            ("🤖・bot-commands", "text", False),
         ]),
         ("🔊 VOICE", [
-            ("🔊 General VC", "voice"),
-            ("🎮 Gaming VC", "voice"),
-            ("🎵 Music VC", "voice"),
+            ("🔊 General VC", "voice", False),
+            ("🎮 Gaming VC", "voice", False),
+            ("🎵 Music VC", "voice", False),
         ]),
-        ("🛡️ STAFF", [
-            ("💼・staff-chat", "text"),
-            (CFG.STAFF_LOG_CHANNEL, "text"),
+        ("🎭 ROLES", [
+            ("🎭・roles", "text", True),
         ]),
     ]
 
-    created = []
-    verify_ch = None
+    created = [c for c in [rules_ch, mod_ch, verify_ch] if c]
+
     for cat_name, chans in structure:
         cat = await safe(g.create_category(cat_name))
         if not cat:
             continue
-        for ch_name, ch_type in chans:
-            overwrites = {}
-            if "STAFF" in cat_name:
-                overwrites = {
-                    g.default_role: discord.PermissionOverwrite(view_channel=False),
-                    admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                    mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                    g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                }
+        for ch_name, ch_type, read_only in chans:
             try:
                 if ch_type == "text":
+                    overwrites = {}
+                    if read_only:
+                        overwrites[g.default_role] = discord.PermissionOverwrite(
+                            view_channel=True, send_messages=False,
+                            read_message_history=True, add_reactions=False,
+                        )
                     ch = await g.create_text_channel(ch_name, category=cat, overwrites=overwrites)
                 else:
-                    ch = await g.create_voice_channel(ch_name, category=cat, overwrites=overwrites)
+                    ch = await g.create_voice_channel(ch_name, category=cat)
                 created.append(ch)
-                if ch.name == CFG.VERIFY_CHANNEL:
-                    verify_ch = ch
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"create channel failed: {ch_name}: {e}")
 
+    # ---------- 7. LOCK UNVERIFIED ----------
     await apply_unverified_lockdown(g)
 
+    # ---------- 8. MASS ASSIGN UNVERIFIED ----------
     assigned = 0
     if u_role:
         async def assign(m):
@@ -1098,23 +1153,29 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
                 assigned += 1
         await asyncio.gather(*[assign(m) for m in g.members])
 
-    if verify_ch is None:
-        verify_ch = discord.utils.get(g.text_channels, name=CFG.VERIFY_CHANNEL)
+    # ---------- 9. DROP VERIFY MESSAGE ----------
     if verify_ch:
         await send_verify_message(verify_ch, g, method=chosen)
 
     bot.add_view(VerifyView())
     bot.add_view(CaptchaStartView())
 
+    # ---------- 10. SUMMARY ----------
     embed = discord.Embed(
         title="✅ Basic Setup Complete",
-        color=discord.Color.green(),
+        description=(
+            f"**Community**: {'✅ Enabled' if community_enabled else '⚠️ Failed'}\n"
+            f"{('Reason: `' + community_error + '`') if community_error else ''}\n"
+            f"**Rules**: {rules_ch.mention if rules_ch else '—'}\n"
+            f"**Mod channel**: {mod_ch.mention if mod_ch else '—'}\n"
+            f"**Verify**: {verify_ch.mention if verify_ch else '—'}"
+        ),
+        color=discord.Color.green() if community_enabled else discord.Color.orange(),
         timestamp=now_utc(),
     )
     embed.add_field(name="Channels", value=str(len(created)), inline=True)
     embed.add_field(name="Unverified assigned", value=str(assigned), inline=True)
     embed.add_field(name="Method", value=chosen, inline=True)
-    embed.add_field(name="Verify channel", value=verify_ch.mention if verify_ch else "—", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -1849,6 +1910,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Members here", value=str(g.member_count), inline=True)
     embed.add_field(name="Captcha engine", value=("Pillow (dynamic)" if HAS_PIL else "Static pool"), inline=True)
     embed.add_field(name="Anti-raid", value="ON" if ANTIRAID_ENABLED else "OFF", inline=True)
+    embed.add_field(name="Community", value="ON" if g.community else "OFF", inline=True)
     if uptime:
         embed.add_field(name="Uptime", value=str(uptime).split(".")[0], inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
