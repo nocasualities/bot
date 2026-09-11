@@ -44,7 +44,7 @@ from discord import app_commands
 from discord.ext import commands
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -209,54 +209,73 @@ def generate_captcha_code(length: int = None) -> str:
     return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
 
 
-def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io.BytesIO:
+def generate_captcha_image(text: str, width: int = 480, height: int = 200) -> io.BytesIO:
     """
-    Readable captcha: light noise, mild rotation, no blur.
-    Humans read it instantly; simple OCR still struggles a bit.
+    Harder captcha — but bigger, so humans can still read it.
+    - canvas 480x200
+    - letters 90-110 px, random bold font per letter
+    - rotation ±30°
+    - heavy noise dots, lines, curved distortions
+    - random light blur
     """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    bg = (random.randint(245, 255), random.randint(245, 255), random.randint(245, 255))
+    bg = (random.randint(235, 255), random.randint(235, 255), random.randint(235, 255))
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
 
-    # light noise dots
-    for _ in range(random.randint(300, 600)):
+    # heavy noise dots
+    for _ in range(random.randint(1200, 2000)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
-        c = (random.randint(180, 230), random.randint(180, 230), random.randint(180, 230))
+        c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
         draw.point((x, y), fill=c)
 
-    # 2-3 faint straight lines
-    for _ in range(random.randint(2, 3)):
+    # straight noise lines
+    for _ in range(random.randint(5, 8)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
-        c = (random.randint(150, 200), random.randint(150, 200), random.randint(150, 200))
-        draw.line((x1, y1, x2, y2), fill=c, width=1)
+        c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
+        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(1, 3))
 
-    # big dark letters, mild rotation
+    # curved distortion lines
+    for _ in range(random.randint(2, 3)):
+        pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
+        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=2)
+
+    # big bold letters, heavy rotation
     char_w = width // (len(text) + 1)
     for i, ch in enumerate(text):
         color = (
-            random.randint(10, 60),
-            random.randint(10, 60),
-            random.randint(10, 60),
+            random.randint(10, 80),
+            random.randint(10, 80),
+            random.randint(10, 80),
         )
-        size = random.randint(56, 64)
+        size = random.randint(90, 110)
         font = _pick_font(size)
         if font is None:
             continue
 
-        tmp = Image.new("RGBA", (size + 40, size + 40), (0, 0, 0, 0))
+        tmp = Image.new("RGBA", (size + 80, size + 80), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
-        td.text((20, 20), ch, font=font, fill=color + (255,))
+        td.text((40, 40), ch, font=font, fill=color + (255,))
 
-        tmp = tmp.rotate(random.randint(-12, 12), resample=Image.BICUBIC, expand=1)
+        tmp = tmp.rotate(
+            random.randint(-30, 30),
+            resample=Image.BICUBIC,
+            expand=1,
+        )
 
-        x = 14 + i * char_w + random.randint(-3, 3)
-        y = (height - tmp.size[1]) // 2 + random.randint(-4, 4)
+        x = 20 + i * char_w + random.randint(-8, 8)
+        y = (height - tmp.size[1]) // 2 + random.randint(-14, 14)
         img.paste(tmp, (x, y), tmp)
+
+    # light degradation
+    if random.random() < 0.5:
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.4, 0.9)))
+    else:
+        img = img.filter(ImageFilter.SMOOTH)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
