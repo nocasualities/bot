@@ -54,7 +54,7 @@ except Exception:
 #                        CONFIG
 # ==========================================================
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
+OWNER_ID = int(os.getenv("OWNER_ID", "123456789012345678"))
 
 
 @dataclass
@@ -209,67 +209,74 @@ def generate_captcha_code(length: int = None) -> str:
     return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
 
 
-def generate_captcha_image(text: str, width: int = 900, height: int = 320) -> io.BytesIO:
+def generate_captcha_image(text: str, width: int = 1400, height: int = 500) -> io.BytesIO:
     """
-    HUGE captcha. Big canvas, big bold letters, heavy noise, mild rotation.
-    Readable from across the room.
+    HUGE captcha — letters fill the entire canvas.
+    canvas 1400x500, letters ~340-400px, each one owns a full column.
     """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    bg = (random.randint(235, 255), random.randint(235, 255), random.randint(235, 255))
+    bg = (random.randint(240, 255), random.randint(240, 255), random.randint(240, 255))
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
 
-    # heavy noise dots
-    for _ in range(random.randint(3000, 5000)):
+    # noise dots
+    for _ in range(random.randint(6000, 9000)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
-        c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
+        c = (random.randint(120, 220), random.randint(120, 220), random.randint(120, 220))
         draw.point((x, y), fill=c)
 
-    # straight noise lines
-    for _ in range(random.randint(8, 12)):
+    # noise lines
+    for _ in range(random.randint(10, 16)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
-        c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
+        c = (random.randint(80, 170), random.randint(80, 170), random.randint(80, 170))
         draw.line((x1, y1, x2, y2), fill=c, width=random.randint(2, 4))
 
     # curved distortion lines
     for _ in range(random.randint(3, 5)):
         pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=3)
+        draw.line(pts, fill=(random.randint(90, 200),) * 3, width=3)
 
-    # BIG bold letters
-    char_w = width // (len(text) + 1)
+    # letters filling the whole frame
+    n = len(text)
+    char_w = width // n
+    font_size = int(height * 0.85)
+
     for i, ch in enumerate(text):
         color = (
-            random.randint(10, 80),
-            random.randint(10, 80),
-            random.randint(10, 80),
+            random.randint(5, 60),
+            random.randint(5, 60),
+            random.randint(5, 60),
         )
-        size = random.randint(180, 220)
+        size = int(font_size * random.uniform(0.9, 1.0))
         font = _pick_font(size)
         if font is None:
             continue
 
-        tmp = Image.new("RGBA", (size + 160, size + 160), (0, 0, 0, 0))
+        pad = size // 2
+        tmp = Image.new("RGBA", (size + pad * 2, size + pad * 2), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
-        td.text((80, 80), ch, font=font, fill=color + (255,))
+        td.text((pad, pad), ch, font=font, fill=color + (255,))
 
         tmp = tmp.rotate(
-            random.randint(-25, 25),
+            random.randint(-15, 15),
             resample=Image.BICUBIC,
             expand=1,
         )
 
-        x = 40 + i * char_w + random.randint(-12, 12)
-        y = (height - tmp.size[1]) // 2 + random.randint(-20, 20)
+        col_x0 = i * char_w
+        col_center = col_x0 + char_w // 2
+        x = col_center - tmp.size[0] // 2 + random.randint(-8, 8)
+        y = (height - tmp.size[1]) // 2 + random.randint(-10, 10)
+
         img.paste(tmp, (x, y), tmp)
 
     # very light degradation
-    if random.random() < 0.5:
-        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.7)))
+    if random.random() < 0.4:
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.2, 0.5)))
     else:
         img = img.filter(ImageFilter.SMOOTH)
 
