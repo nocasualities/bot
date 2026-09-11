@@ -209,14 +209,10 @@ def generate_captcha_code(length: int = None) -> str:
     return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
 
 
-def generate_captcha_image(text: str, width: int = 480, height: int = 200) -> io.BytesIO:
+def generate_captcha_image(text: str, width: int = 900, height: int = 320) -> io.BytesIO:
     """
-    Harder captcha — but bigger, so humans can still read it.
-    - canvas 480x200
-    - letters 90-110 px, random bold font per letter
-    - rotation ±30°
-    - heavy noise dots, lines, curved distortions
-    - random light blur
+    HUGE captcha. Big canvas, big bold letters, heavy noise, mild rotation.
+    Readable from across the room.
     """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
@@ -226,25 +222,25 @@ def generate_captcha_image(text: str, width: int = 480, height: int = 200) -> io
     draw = ImageDraw.Draw(img)
 
     # heavy noise dots
-    for _ in range(random.randint(1200, 2000)):
+    for _ in range(random.randint(3000, 5000)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
         c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
         draw.point((x, y), fill=c)
 
     # straight noise lines
-    for _ in range(random.randint(5, 8)):
+    for _ in range(random.randint(8, 12)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
         c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
-        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(1, 3))
+        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(2, 4))
 
     # curved distortion lines
-    for _ in range(random.randint(2, 3)):
+    for _ in range(random.randint(3, 5)):
         pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=2)
+        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=3)
 
-    # big bold letters, heavy rotation
+    # BIG bold letters
     char_w = width // (len(text) + 1)
     for i, ch in enumerate(text):
         color = (
@@ -252,28 +248,28 @@ def generate_captcha_image(text: str, width: int = 480, height: int = 200) -> io
             random.randint(10, 80),
             random.randint(10, 80),
         )
-        size = random.randint(90, 110)
+        size = random.randint(180, 220)
         font = _pick_font(size)
         if font is None:
             continue
 
-        tmp = Image.new("RGBA", (size + 80, size + 80), (0, 0, 0, 0))
+        tmp = Image.new("RGBA", (size + 160, size + 160), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
-        td.text((40, 40), ch, font=font, fill=color + (255,))
+        td.text((80, 80), ch, font=font, fill=color + (255,))
 
         tmp = tmp.rotate(
-            random.randint(-30, 30),
+            random.randint(-25, 25),
             resample=Image.BICUBIC,
             expand=1,
         )
 
-        x = 20 + i * char_w + random.randint(-8, 8)
-        y = (height - tmp.size[1]) // 2 + random.randint(-14, 14)
+        x = 40 + i * char_w + random.randint(-12, 12)
+        y = (height - tmp.size[1]) // 2 + random.randint(-20, 20)
         img.paste(tmp, (x, y), tmp)
 
-    # light degradation
+    # very light degradation
     if random.random() < 0.5:
-        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.4, 0.9)))
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.7)))
     else:
         img = img.filter(ImageFilter.SMOOTH)
 
