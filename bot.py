@@ -1012,9 +1012,11 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     g = interaction.guild
     chosen = method.value if method else "button"
 
-    # ---------- 1. WIPE ALL CHANNELS ----------
+    # ---------- 1. WIPE EVERYTHING ----------
     for ch in list(g.channels):
         await safe(ch.delete(reason="Basic setup reset"))
+    # brief pause so Discord processes deletions before we start creating
+    await asyncio.sleep(2)
 
     # ---------- 2. ROLES ----------
     owner_role = await find_or_create_role(g, "👑 Owner", discord.Color.gold(), hoist=True, permissions=discord.Permissions.all())
@@ -1053,13 +1055,13 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         g.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
 
-    # ---------- 3. CREATE IN EXACT ORDER ----------
+    # ---------- 3. BUILD STRUCTURE — ALL CATEGORIES IN ORDER ----------
+    created   = []
     rules_ch  = None
     mod_ch    = None
     verify_ch = None
-    created   = []
 
-    # --- 3.1 INFORMATION (rules first — needed for Community) ---
+    # --- INFORMATION ---
     cat = await safe(g.create_category("📜 INFORMATION"))
     if cat:
         rules_ch = await safe(g.create_text_channel(
@@ -1067,16 +1069,18 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             topic="Server rules and guidelines.",
             overwrites=INFO_RO,
         ))
-        if rules_ch: created.append(rules_ch)
+        if rules_ch:
+            created.append(rules_ch)
 
-    # --- 3.2 ANNOUNCEMENTS ---
+    # --- ANNOUNCEMENTS ---
     cat = await safe(g.create_category("📢 ANNOUNCEMENTS"))
     if cat:
         for name in ("📣・announcements", "🎉・events"):
             ch = await safe(g.create_text_channel(name, category=cat, overwrites=INFO_RO))
-            if ch: created.append(ch)
+            if ch:
+                created.append(ch)
 
-    # --- 3.3 VERIFICATION ---
+    # --- VERIFICATION ---
     cat = await safe(g.create_category(CFG.VERIFY_CATEGORY))
     if cat:
         verify_ch = await safe(g.create_text_channel(
@@ -1088,38 +1092,50 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             },
             topic="Verify to gain access to the server.",
         ))
-        if verify_ch: created.append(verify_ch)
+        if verify_ch:
+            created.append(verify_ch)
 
-    # --- 3.4 GENERAL ---
+    # --- GENERAL ---
     cat = await safe(g.create_category("💬 GENERAL"))
     if cat:
         for name in ("💬・general-chat", "🖼️・media", "🤖・bot-commands"):
             ch = await safe(g.create_text_channel(name, category=cat))
-            if ch: created.append(ch)
+            if ch:
+                created.append(ch)
 
-    # --- 3.5 VOICE ---
+    # --- VOICE ---
     cat = await safe(g.create_category("🔊 VOICE"))
     if cat:
         for name in ("🔊 General VC", "🎮 Gaming VC", "🎵 Music VC"):
             ch = await safe(g.create_voice_channel(name, category=cat))
-            if ch: created.append(ch)
+            if ch:
+                created.append(ch)
 
-    # --- 3.6 ROLES ---
+    # --- ROLES ---
     cat = await safe(g.create_category("🎭 ROLES"))
     if cat:
         ch = await safe(g.create_text_channel("🎭・roles", category=cat, overwrites=INFO_RO))
-        if ch: created.append(ch)
+        if ch:
+            created.append(ch)
 
-    # --- 3.7 STAFF (last so it sits at the bottom) ---
-    cat = await safe(g.create_category("🛡️ STAFF", overwrites={
+    # --- STAFF (created last so it sits at the very bottom) ---
+    staff_cat = await safe(g.create_category("🛡️ STAFF", overwrites={
         g.default_role: discord.PermissionOverwrite(view_channel=False),
         member_role:    discord.PermissionOverwrite(view_channel=False),
     }))
-    if cat:
-        for name in ("💼・staff-chat", CFG.STAFF_LOG_CHANNEL):
-            ch = await safe(g.create_text_channel(name, category=cat, overwrites=STAFF_ONLY))
-            if ch: created.append(ch)
-        mod_ch = discord.utils.get(g.text_channels, name="💼・staff-chat")
+    if staff_cat:
+        mod_ch = await safe(g.create_text_channel(
+            "💼・staff-chat", category=staff_cat, overwrites=STAFF_ONLY,
+            topic="Moderator-only channel.",
+        ))
+        if mod_ch:
+            created.append(mod_ch)
+        logs_ch = await safe(g.create_text_channel(
+            CFG.STAFF_LOG_CHANNEL, category=staff_cat, overwrites=STAFF_ONLY,
+            topic="Staff logs.",
+        ))
+        if logs_ch:
+            created.append(logs_ch)
 
     # ---------- 4. ENABLE COMMUNITY ----------
     community_enabled = False
@@ -1144,7 +1160,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
                 community_error = str(e2)
                 logger.warning(f"[COMMUNITY] Retry failed: {e2}")
     else:
-        community_error = "rules channel or mod channel missing"
+        community_error = "rules or mod channel missing"
 
     # ---------- 5. LOCK UNVERIFIED ----------
     await apply_unverified_lockdown(g)
@@ -1179,7 +1195,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             f"**Community**: {'✅ Enabled' if community_enabled else '⚠️ Failed'}\n"
             f"{('Reason: `' + community_error + '`') if community_error else ''}\n"
             f"**Rules**: {rules_ch.mention if rules_ch else '—'}\n"
-            f"**Staff channel**: {mod_ch.mention if mod_ch else '—'}\n"
+            f"**Staff**: {mod_ch.mention if mod_ch else '—'}\n"
             f"**Verify**: {verify_ch.mention if verify_ch else '—'}"
         ),
         color=discord.Color.green() if community_enabled else discord.Color.orange(),
