@@ -151,10 +151,16 @@ def ts(dt: datetime, style: str = "R") -> str:
     return discord.utils.format_dt(dt, style)
 
 
+def normalize(s: str) -> str:
+    """Keep only alphanumerics, lowercase. Forgiving for user input."""
+    return "".join(ch for ch in str(s) if ch.isalnum()).lower()
+
+
 # ==========================================================
 #                    CAPTCHA GENERATION
 # ==========================================================
-CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+# Ambiguity-free alphabet: no 0/O, 1/I/L, 2/Z, 5/S, 8/B, 6/G.
+CAPTCHA_CHARS = "346789ACDEFHJKMNPQRTUVWXY"
 CAPTCHA_MIN = 5
 CAPTCHA_MAX = 5
 
@@ -211,36 +217,39 @@ def generate_captcha_code(length: int = None) -> str:
 
 def generate_captcha_image(text: str, width: int = 1400, height: int = 500) -> io.BytesIO:
     """
-    HUGE captcha — letters fill the entire canvas.
-    canvas 1400x500, letters ~340-400px, each one owns a full column.
+    Huge readable captcha. Letters fill the whole canvas.
+    - 1400x500 canvas
+    - letters ~340-400px each, own column
+    - mild rotation ±8° so letters stay straight and readable
+    - light noise, no blur
     """
     if not HAS_PIL:
         raise RuntimeError("Pillow is not installed.")
 
-    bg = (random.randint(240, 255), random.randint(240, 255), random.randint(240, 255))
+    bg = (random.randint(245, 255), random.randint(245, 255), random.randint(245, 255))
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
 
-    # noise dots
-    for _ in range(random.randint(6000, 9000)):
+    # light noise dots
+    for _ in range(random.randint(2000, 3500)):
         x = random.randint(0, width - 1)
         y = random.randint(0, height - 1)
-        c = (random.randint(120, 220), random.randint(120, 220), random.randint(120, 220))
+        c = (random.randint(150, 220), random.randint(150, 220), random.randint(150, 220))
         draw.point((x, y), fill=c)
 
-    # noise lines
-    for _ in range(random.randint(10, 16)):
+    # few noise lines
+    for _ in range(random.randint(3, 5)):
         x1, y1 = random.randint(0, width), random.randint(0, height)
         x2, y2 = random.randint(0, width), random.randint(0, height)
-        c = (random.randint(80, 170), random.randint(80, 170), random.randint(80, 170))
-        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(2, 4))
+        c = (random.randint(120, 180), random.randint(120, 180), random.randint(120, 180))
+        draw.line((x1, y1, x2, y2), fill=c, width=random.randint(2, 3))
 
-    # curved distortion lines
-    for _ in range(random.randint(3, 5)):
+    # very few curved distortion lines
+    for _ in range(random.randint(1, 2)):
         pts = [(random.randint(0, width), random.randint(0, height)) for _ in range(4)]
-        draw.line(pts, fill=(random.randint(90, 200),) * 3, width=3)
+        draw.line(pts, fill=(random.randint(120, 200),) * 3, width=2)
 
-    # letters filling the whole frame
+    # --- letters: huge, dark, clean ---
     n = len(text)
     char_w = width // n
     font_size = int(height * 0.85)
@@ -261,24 +270,22 @@ def generate_captcha_image(text: str, width: int = 1400, height: int = 500) -> i
         td = ImageDraw.Draw(tmp)
         td.text((pad, pad), ch, font=font, fill=color + (255,))
 
+        # mild rotation only — keeps letters readable
         tmp = tmp.rotate(
-            random.randint(-15, 15),
+            random.randint(-8, 8),
             resample=Image.BICUBIC,
             expand=1,
         )
 
         col_x0 = i * char_w
         col_center = col_x0 + char_w // 2
-        x = col_center - tmp.size[0] // 2 + random.randint(-8, 8)
-        y = (height - tmp.size[1]) // 2 + random.randint(-10, 10)
+        x = col_center - tmp.size[0] // 2 + random.randint(-6, 6)
+        y = (height - tmp.size[1]) // 2 + random.randint(-8, 8)
 
         img.paste(tmp, (x, y), tmp)
 
-    # very light degradation
-    if random.random() < 0.4:
-        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.2, 0.5)))
-    else:
-        img = img.filter(ImageFilter.SMOOTH)
+    # no blur — just a mild smooth to keep anti-aliasing
+    img = img.filter(ImageFilter.SMOOTH)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -488,22 +495,26 @@ class CaptchaModal(discord.ui.Modal, title="🔐 Security Check"):
     code = discord.ui.TextInput(
         label="Enter the code from the image",
         placeholder="Type exactly what you see",
-        min_length=2,
-        max_length=12,
+        min_length=1,
+        max_length=20,
         required=True,
     )
 
     def __init__(self, expected: str, user_id: int):
         super().__init__(timeout=120)
-        self.expected = expected.strip().lower()
+        self.expected = normalize(expected)
         self.user_id = user_id
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return
 
-        entered = str(self.code).strip().lower()
+        entered = normalize(str(self.code))
         METRICS["captcha_attempts"] += 1
+
+        logger.info(
+            f"[CAPTCHA] user={interaction.user.id} expected={self.expected!r} entered={entered!r}"
+        )
 
         if is_locked_out(interaction.user.id):
             await interaction.response.send_message("🔒 You are temporarily locked out. Try again later.", ephemeral=True)
