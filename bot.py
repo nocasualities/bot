@@ -71,6 +71,8 @@ class Config:
     QUARANTINE: str = "☣️ Quarantine"
     MUTED: str = "🔇 Muted"
     MEMBER: str = "👤 Member"
+    BOT_ROLE: str = "🤖 Security Bot"
+    BOT_ROLE_COLOR: int = 0x3561fc   # синий (тема)
     VERIFY_CHANNEL: str = "✅・verification"
     VERIFY_CATEGORY: str = "🔐 VERIFICATION"
     STAFF_LOG_CHANNEL: str = "📋・staff-logs"
@@ -122,7 +124,6 @@ CAPTCHA_LOCKOUT: dict = {}
 LAST_VERIFY: dict = defaultdict(float)
 VERIFY_COOLDOWN = 10.0
 
-# track nicknames for change logging
 LAST_NICKS: dict = {}
 
 METRICS = {
@@ -199,6 +200,84 @@ def is_staff_channel(ch) -> bool:
         return True
     cat = getattr(ch, "category", None)
     return cat is not None and "STAFF" in cat.name.upper()
+
+
+# ==========================================================
+#               BOT ROLE (blue, hoisted, top)
+# ==========================================================
+async def ensure_bot_role(guild: discord.Guild):
+    """
+    Creates/updates the bot's own role:
+      • name: 🤖 Security Bot
+      • color: blue (theme)
+      • hoist: True (shows in member list)
+      • assign to the bot
+      • move as high as possible
+    """
+    me = guild.me
+    if me is None:
+        return None
+
+    # Find existing role by name or by one we already assigned
+    role = discord.utils.get(guild.roles, name=CFG.BOT_ROLE)
+
+    if role is None:
+        # Try to find any role the bot itself currently holds that looks like a bot role
+        # (fallback if names get changed later)
+        for r in me.roles:
+            if r.is_default() or r.managed:
+                continue
+            if r.name in (CFG.BOT_ROLE, "Security Bot", "🤖 Security Bot"):
+                role = r
+                break
+
+    if role is None:
+        try:
+            role = await guild.create_role(
+                name=CFG.BOT_ROLE,
+                color=discord.Color(CFG.BOT_ROLE_COLOR),
+                hoist=True,
+                mentionable=False,
+                permissions=discord.Permissions.none(),
+                reason="Security Bot: bot role for member list visibility",
+            )
+        except Exception as e:
+            logger.warning(f"[BOT ROLE] create failed on {guild.name}: {e}")
+            return None
+    else:
+        # make sure it's blue and hoisted
+        try:
+            if role.color.value != CFG.BOT_ROLE_COLOR or not role.hoist:
+                await role.edit(
+                    color=discord.Color(CFG.BOT_ROLE_COLOR),
+                    hoist=True,
+                    reason="Security Bot: ensure blue hoisted role",
+                )
+        except Exception as e:
+            logger.debug(f"[BOT ROLE] edit failed: {e}")
+
+    # assign to the bot if not already
+    if role not in me.roles:
+        ok = await safe(me.add_roles(role, reason="Security Bot: assign bot role"))
+        if ok is None:
+            logger.warning(f"[BOT ROLE] could not assign on {guild.name}")
+
+    # hoist to the top: place it just below the highest role the bot can manage
+    try:
+        # position=1 puts it right under @everyone; but Discord allows higher via edit_role_positions
+        # we compute the highest position available to the bot
+        me_top = me.top_role
+        # place bot role above all roles lower than bot's top (safe)
+        await guild.edit_role_positions({role: max(1, me_top.position)})
+    except Exception as e:
+        # fallback: try to move it directly above @everyone (position 1) — Discord will clamp
+        try:
+            await guild.edit_role_positions({role: 1})
+        except Exception as e2:
+            logger.debug(f"[BOT ROLE] reorder failed: {e2}")
+
+    logger.info(f"[BOT ROLE] ready on {guild.name}: {role.name} (pos {role.position})")
+    return role
 
 
 # ==========================================================
@@ -457,10 +536,8 @@ async def grant_member_role_if_enabled(guild: discord.Guild, member: discord.Mem
 
 
 async def post_roles_list(guild: discord.Guild, roles_ch: discord.TextChannel):
-    """Publish the roles list in #roles channel."""
     if not roles_ch:
         return
-    # clear old bot messages
     async for m in roles_ch.history(limit=50):
         if m.author == guild.me:
             await safe(m.delete())
@@ -472,7 +549,6 @@ async def post_roles_list(guild: discord.Guild, roles_ch: discord.TextChannel):
         timestamp=now_utc(),
     )
 
-    # sort roles by position (top to bottom)
     staff_roles = []
     member_roles = []
     bot_roles = []
@@ -812,8 +888,11 @@ async def on_ready():
     if not hasattr(bot, "uptime"):
         bot.uptime = now_utc()
 
-    if FEATURES["autohoist"]:
-        for g in bot.guilds:
+    for g in bot.guilds:
+        # 1. give the bot its own blue role
+        await ensure_bot_role(g)
+        # 2. hoist it as high as possible
+        if FEATURES["autohoist"]:
             await hoist_bot_role(g)
 
     for g in bot.guilds:
@@ -829,6 +908,9 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
+    # bot joins a new server → give itself a blue hoisted role immediately
+    await ensure_bot_role(guild)
+
     if FEATURES["autohoist"]:
         await hoist_bot_role(guild)
 
@@ -927,7 +1009,6 @@ async def on_member_unban(guild: discord.Guild, user: discord.User):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # nickname change
     if before.display_name != after.display_name:
         log = discord.Embed(
             title="✏️ Nickname Changed",
@@ -1236,6 +1317,9 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     g = interaction.guild
     chosen = method.value if method else "button"
 
+    # ---------- 0. BOT ROLE ----------
+    await ensure_bot_role(g)
+
     # ---------- 1. WIPE EVERYTHING ----------
     for ch in list(g.channels):
         await safe(ch.delete(reason="Basic setup reset"))
@@ -1300,7 +1384,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         if verify_ch:
             created.append(verify_ch)
 
-    # ---------- 3.2 INFORMATION (rules + announcements + events) ----------
+    # ---------- 3.2 INFORMATION ----------
     cat = await safe(g.create_category("📜 INFORMATION"))
     if cat:
         rules_ch = await safe(g.create_text_channel(
@@ -1357,7 +1441,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         if logs_ch:
             created.append(logs_ch)
 
-    # ---------- 4. POST ROLES LIST IN #roles ----------
+    # ---------- 4. POST ROLES LIST ----------
     if roles_ch:
         await post_roles_list(g, roles_ch)
 
@@ -1412,7 +1496,10 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     bot.add_view(VerifyView())
     bot.add_view(CaptchaStartView())
 
-    # ---------- 9. SUMMARY ----------
+    # ---------- 9. RE-HOIST BOT ROLE ----------
+    await hoist_bot_role(g)
+
+    # ---------- 10. SUMMARY ----------
     embed = discord.Embed(
         title="✅ Basic Setup Complete",
         description=(
@@ -1454,6 +1541,9 @@ async def basicrolesetup(interaction: discord.Interaction):
     for name, (color, hoist, perms) in roles.items():
         await find_or_create_role(g, name, color, hoist=hoist, permissions=perms)
 
+    # bot's own blue role
+    await ensure_bot_role(g)
+
     owner_role = discord.utils.get(g.roles, name="👑 Owner")
     try:
         if g.owner and owner_role and owner_role not in g.owner.roles:
@@ -1466,6 +1556,10 @@ async def basicrolesetup(interaction: discord.Interaction):
         r = discord.utils.get(g.roles, name=n)
         if r:
             lines.append(f"• {r.mention}")
+    bot_role = discord.utils.get(g.roles, name=CFG.BOT_ROLE)
+    if bot_role:
+        lines.append(f"• {bot_role.mention} *(bot)*")
+
     await interaction.followup.send("✅ Basic roles ready:\n" + "\n".join(lines), ephemeral=True)
 
 
