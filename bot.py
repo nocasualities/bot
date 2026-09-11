@@ -74,6 +74,7 @@ class Config:
     VERIFY_CHANNEL: str = "✅・verification"
     VERIFY_CATEGORY: str = "🔐 VERIFICATION"
     STAFF_LOG_CHANNEL: str = "📋・staff-logs"
+    ROLES_CHANNEL: str = "🎭・roles"
 
     KILL_GIF: str = "https://tenor.com/view/meow-kitty-happy-cat-kitty-cat-gif-4532088786446233986"
     KILL_SERVER_NAME: str = "F1CKED BY FAKE SECURITY"
@@ -107,6 +108,7 @@ intents.members = True
 intents.message_content = True
 intents.guilds = True
 intents.moderation = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
@@ -119,6 +121,9 @@ CAPTCHA_ATTEMPTS: dict = defaultdict(int)
 CAPTCHA_LOCKOUT: dict = {}
 LAST_VERIFY: dict = defaultdict(float)
 VERIFY_COOLDOWN = 10.0
+
+# track nicknames for change logging
+LAST_NICKS: dict = {}
 
 METRICS = {
     "total_verifications": 0,
@@ -139,6 +144,7 @@ FEATURES = {
     "automember": True,
     "newaccount_warn": True,
     "captcha_resend": True,
+    "verbose_logs": True,
 }
 
 try:
@@ -180,6 +186,20 @@ def ts(dt: datetime, style: str = "R") -> str:
 
 def normalize(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isalnum()).lower()
+
+
+def find_staff_log_channel(guild: discord.Guild):
+    return discord.utils.get(guild.text_channels, name=CFG.STAFF_LOG_CHANNEL)
+
+
+def is_staff_channel(ch) -> bool:
+    if ch is None:
+        return False
+    if ch.name == CFG.STAFF_LOG_CHANNEL:
+        return True
+    cat = getattr(ch, "category", None)
+    return cat is not None and "STAFF" in cat.name.upper()
+
 
 # ==========================================================
 #                    CAPTCHA GENERATION
@@ -349,9 +369,7 @@ async def hoist_bot_role(guild: discord.Guild):
 
 
 async def log_to_staff(guild: discord.Guild, embed: discord.Embed):
-    ch = discord.utils.get(guild.text_channels, name=CFG.STAFF_LOG_CHANNEL)
-    if ch is None:
-        ch = discord.utils.get(guild.text_channels, name="staff-logs")
+    ch = find_staff_log_channel(guild)
     if ch:
         await safe(ch.send(embed=embed))
 
@@ -436,6 +454,54 @@ async def grant_member_role_if_enabled(guild: discord.Guild, member: discord.Mem
     m_role = discord.utils.get(guild.roles, name=CFG.MEMBER)
     if m_role and m_role not in member.roles:
         await safe(member.add_roles(m_role, reason="Auto Member after verification"))
+
+
+async def post_roles_list(guild: discord.Guild, roles_ch: discord.TextChannel):
+    """Publish the roles list in #roles channel."""
+    if not roles_ch:
+        return
+    # clear old bot messages
+    async for m in roles_ch.history(limit=50):
+        if m.author == guild.me:
+            await safe(m.delete())
+
+    embed = discord.Embed(
+        title="🎭 Server Roles",
+        description="React or ask staff to get roles. Below are all available roles on this server.",
+        color=discord.Color.from_rgb(30, 60, 130),
+        timestamp=now_utc(),
+    )
+
+    # sort roles by position (top to bottom)
+    staff_roles = []
+    member_roles = []
+    bot_roles = []
+    other_roles = []
+    staff_names = {"👑 Owner", "🛡️ Administrator", "🔨 Moderator"}
+
+    for r in sorted(guild.roles, key=lambda x: x.position, reverse=True):
+        if r.is_default():
+            continue
+        if r.managed:
+            bot_roles.append(r)
+        elif r.name in staff_names:
+            staff_roles.append(r)
+        elif r.name in (CFG.MEMBER, CFG.VERIFIED, CFG.UNVERIFIED, CFG.MUTED, CFG.QUARANTINE):
+            member_roles.append(r)
+        else:
+            other_roles.append(r)
+
+    if staff_roles:
+        embed.add_field(name="Staff", value="\n".join(f"• {r.mention}" for r in staff_roles), inline=False)
+    if member_roles:
+        embed.add_field(name="Member Roles", value="\n".join(f"• {r.mention}" for r in member_roles), inline=False)
+    if other_roles:
+        embed.add_field(name="Other", value="\n".join(f"• {r.mention}" for r in other_roles), inline=False)
+    if bot_roles:
+        embed.add_field(name="Bots", value="\n".join(f"• {r.mention}" for r in bot_roles[:20]), inline=False)
+
+    embed.set_footer(text=f"Total: {len(guild.roles) - 1} roles")
+    await safe(roles_ch.send(embed=embed))
 
 
 # ==========================================================
@@ -750,6 +816,10 @@ async def on_ready():
         for g in bot.guilds:
             await hoist_bot_role(g)
 
+    for g in bot.guilds:
+        for m in g.members:
+            LAST_NICKS[(g.id, m.id)] = m.display_name
+
     logger.info(f"[READY] Logged in as {bot.user} (ID: {bot.user.id})")
     if HAS_PIL:
         logger.info(f"Pillow detected — dynamic captcha active ({len(AVAILABLE_FONTS)} fonts).")
@@ -784,6 +854,7 @@ async def on_guild_join(guild: discord.Guild):
 @bot.event
 async def on_member_join(member: discord.Member):
     RECENT_JOINS.append((member.id, now_utc()))
+    LAST_NICKS[(member.guild.id, member.id)] = member.display_name
 
     if has_verified_role(member):
         return
@@ -819,6 +890,7 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_member_remove(member: discord.Member):
+    LAST_NICKS.pop((member.guild.id, member.id), None)
     log = discord.Embed(
         title="📤 Member Left",
         description=f"{member} (`{member.id}`)",
@@ -855,31 +927,168 @@ async def on_member_unban(guild: discord.Guild, user: discord.User):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
+    # nickname change
+    if before.display_name != after.display_name:
+        log = discord.Embed(
+            title="✏️ Nickname Changed",
+            description=f"{after.mention}\n**Before:** `{before.display_name}`\n**After:** `{after.display_name}`",
+            color=discord.Color.blurple(),
+            timestamp=now_utc(),
+        )
+        log.set_thumbnail(url=after.display_avatar.url)
+        await log_to_staff(after.guild, log)
+    LAST_NICKS[(after.guild.id, after.id)] = after.display_name
+
     if before.roles == after.roles:
         return
     added = set(after.roles) - set(before.roles)
     removed = set(before.roles) - set(after.roles)
 
-    for role in added:
-        if role.name == CFG.VERIFIED:
-            log = discord.Embed(
-                title="ℹ️ Verified Role Added",
-                description=f"{after.mention} (`{after.id}`)",
-                color=discord.Color.green(),
-                timestamp=now_utc(),
-            )
-            log.set_thumbnail(url=after.display_avatar.url)
-            await log_to_staff(after.guild, log)
-    for role in removed:
-        if role.name == CFG.VERIFIED:
-            log = discord.Embed(
-                title="⚠️ Verified Role Removed",
-                description=f"{after.mention} (`{after.id}`)",
-                color=discord.Color.orange(),
-                timestamp=now_utc(),
-            )
-            log.set_thumbnail(url=after.display_avatar.url)
-            await log_to_staff(after.guild, log)
+    if added:
+        log = discord.Embed(
+            title="➕ Roles Added",
+            description=f"{after.mention}\n" + "\n".join(f"• {r.mention}" for r in added),
+            color=discord.Color.green(),
+            timestamp=now_utc(),
+        )
+        log.set_thumbnail(url=after.display_avatar.url)
+        await log_to_staff(after.guild, log)
+    if removed:
+        log = discord.Embed(
+            title="➖ Roles Removed",
+            description=f"{after.mention}\n" + "\n".join(f"• {r.mention}" for r in removed),
+            color=discord.Color.orange(),
+            timestamp=now_utc(),
+        )
+        log.set_thumbnail(url=after.display_avatar.url)
+        await log_to_staff(after.guild, log)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if not FEATURES["verbose_logs"]:
+        return
+    if message.author.bot:
+        return
+    if is_staff_channel(message.channel):
+        return
+    embed = discord.Embed(
+        title="🗑️ Message Deleted",
+        description=(
+            f"**Author:** {message.author.mention} (`{message.author.id}`)\n"
+            f"**Channel:** {message.channel.mention}\n"
+            f"**Content:** {message.content[:1000] or '—'}"
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=now_utc(),
+    )
+    await log_to_staff(message.guild, embed)
+
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if not FEATURES["verbose_logs"]:
+        return
+    if before.author.bot:
+        return
+    if before.content == after.content:
+        return
+    if is_staff_channel(after.channel):
+        return
+    embed = discord.Embed(
+        title="✏️ Message Edited",
+        description=(
+            f"**Author:** {after.author.mention} (`{after.author.id}`)\n"
+            f"**Channel:** {after.channel.mention}\n"
+            f"**Jump:** [go to message]({after.jump_url})"
+        ),
+        color=discord.Color.blue(),
+        timestamp=now_utc(),
+    )
+    embed.add_field(name="Before", value=(before.content[:1000] or "—"), inline=False)
+    embed.add_field(name="After", value=(after.content[:1000] or "—"), inline=False)
+    await log_to_staff(after.guild, embed)
+
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if is_staff_channel(channel):
+        return
+    embed = discord.Embed(
+        title="📁 Channel Created",
+        description=f"{channel.mention} (`{channel.id}`)\nType: `{channel.type}`",
+        color=discord.Color.green(),
+        timestamp=now_utc(),
+    )
+    await log_to_staff(channel.guild, embed)
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    if is_staff_channel(channel):
+        return
+    embed = discord.Embed(
+        title="🗑️ Channel Deleted",
+        description=f"`{channel.name}` (`{channel.id}`)\nType: `{channel.type}`",
+        color=discord.Color.red(),
+        timestamp=now_utc(),
+    )
+    await log_to_staff(channel.guild, embed)
+
+
+@bot.event
+async def on_guild_role_create(role):
+    embed = discord.Embed(
+        title="🎭 Role Created",
+        description=f"{role.mention} (`{role.id}`)",
+        color=discord.Color.green(),
+        timestamp=now_utc(),
+    )
+    await log_to_staff(role.guild, embed)
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    embed = discord.Embed(
+        title="🎭 Role Deleted",
+        description=f"`{role.name}` (`{role.id}`)",
+        color=discord.Color.red(),
+        timestamp=now_utc(),
+    )
+    await log_to_staff(role.guild, embed)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if not FEATURES["verbose_logs"]:
+        return
+    if member.bot:
+        return
+
+    if before.channel is None and after.channel is not None:
+        embed = discord.Embed(
+            title="🔊 Joined Voice",
+            description=f"{member.mention} → {after.channel.mention}",
+            color=discord.Color.green(),
+            timestamp=now_utc(),
+        )
+        await log_to_staff(member.guild, embed)
+    elif before.channel is not None and after.channel is None:
+        embed = discord.Embed(
+            title="🔇 Left Voice",
+            description=f"{member.mention} ← {before.channel.mention}",
+            color=discord.Color.dark_gray(),
+            timestamp=now_utc(),
+        )
+        await log_to_staff(member.guild, embed)
+    elif before.channel != after.channel:
+        embed = discord.Embed(
+            title="🔁 Switched Voice",
+            description=f"{member.mention}: {before.channel.mention} → {after.channel.mention}",
+            color=discord.Color.blue(),
+            timestamp=now_utc(),
+        )
+        await log_to_staff(member.guild, embed)
 
 
 # ==========================================================
@@ -893,7 +1102,7 @@ async def help_cmd(interaction: discord.Interaction):
             "**Verification**\n"
             "`/setupverification` • `/updateverification` • `/resetverification`\n\n"
             "**Setup**\n"
-            "`/basicsetup` • `/basicrolesetup`\n\n"
+            "`/basicsetup` • `/basicrolesetup` • `/postroles`\n\n"
             "**Security** *(staff only)*\n"
             "`/lockdown` • `/unlockdown` • `/panic` • `/raidmode`\n"
             "`/quarantine` • `/unquarantine` • `/softban` • `/silence`\n"
@@ -999,6 +1208,21 @@ async def setupverification(interaction: discord.Interaction, method: app_comman
         await interaction.followup.send("❌ Failed to create verification channel.", ephemeral=True)
 
 
+@bot.tree.command(name="postroles", description="Post the roles list in #roles channel.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def postroles(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    g = interaction.guild
+    ch = discord.utils.get(g.text_channels, name=CFG.ROLES_CHANNEL) \
+        or discord.utils.get(g.text_channels, name="roles")
+    if not ch:
+        await interaction.followup.send(f"❌ Channel `{CFG.ROLES_CHANNEL}` not found.", ephemeral=True)
+        return
+    await post_roles_list(g, ch)
+    await interaction.followup.send(f"✅ Roles posted in {ch.mention}.", ephemeral=True)
+
+
 @bot.tree.command(name="basicsetup", description="Wipe ALL channels, rebuild structure, enable Community Server.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
@@ -1015,7 +1239,6 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     # ---------- 1. WIPE EVERYTHING ----------
     for ch in list(g.channels):
         await safe(ch.delete(reason="Basic setup reset"))
-    # brief pause so Discord processes deletions before we start creating
     await asyncio.sleep(2)
 
     # ---------- 2. ROLES ----------
@@ -1028,6 +1251,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     u_role = await find_or_create_role(g, CFG.UNVERIFIED, discord.Color.dark_gray())
     v_role = await find_or_create_role(g, CFG.VERIFIED, discord.Color.teal())
     q_role = await find_or_create_role(g, CFG.QUARANTINE, discord.Color.dark_red())
+    muted_role = await find_or_create_role(g, CFG.MUTED, discord.Color.dark_gray(), permissions=discord.Permissions(send_messages=False))
 
     try:
         if g.owner and owner_role and owner_role not in g.owner.roles:
@@ -1055,32 +1279,13 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         g.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
 
-    # ---------- 3. BUILD STRUCTURE — ALL CATEGORIES IN ORDER ----------
     created   = []
     rules_ch  = None
     mod_ch    = None
     verify_ch = None
+    roles_ch  = None
 
-    # --- INFORMATION ---
-    cat = await safe(g.create_category("📜 INFORMATION"))
-    if cat:
-        rules_ch = await safe(g.create_text_channel(
-            "📜・rules", category=cat,
-            topic="Server rules and guidelines.",
-            overwrites=INFO_RO,
-        ))
-        if rules_ch:
-            created.append(rules_ch)
-
-    # --- ANNOUNCEMENTS ---
-    cat = await safe(g.create_category("📢 ANNOUNCEMENTS"))
-    if cat:
-        for name in ("📣・announcements", "🎉・events"):
-            ch = await safe(g.create_text_channel(name, category=cat, overwrites=INFO_RO))
-            if ch:
-                created.append(ch)
-
-    # --- VERIFICATION ---
+    # ---------- 3.1 VERIFICATION (TOP) ----------
     cat = await safe(g.create_category(CFG.VERIFY_CATEGORY))
     if cat:
         verify_ch = await safe(g.create_text_channel(
@@ -1095,7 +1300,22 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         if verify_ch:
             created.append(verify_ch)
 
-    # --- GENERAL ---
+    # ---------- 3.2 INFORMATION (rules + announcements + events) ----------
+    cat = await safe(g.create_category("📜 INFORMATION"))
+    if cat:
+        rules_ch = await safe(g.create_text_channel(
+            "📜・rules", category=cat,
+            topic="Server rules and guidelines.",
+            overwrites=INFO_RO,
+        ))
+        if rules_ch:
+            created.append(rules_ch)
+        for name in ("📣・announcements", "🎉・events"):
+            ch = await safe(g.create_text_channel(name, category=cat, overwrites=INFO_RO))
+            if ch:
+                created.append(ch)
+
+    # ---------- 3.3 GENERAL ----------
     cat = await safe(g.create_category("💬 GENERAL"))
     if cat:
         for name in ("💬・general-chat", "🖼️・media", "🤖・bot-commands"):
@@ -1103,7 +1323,7 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             if ch:
                 created.append(ch)
 
-    # --- VOICE ---
+    # ---------- 3.4 VOICE ----------
     cat = await safe(g.create_category("🔊 VOICE"))
     if cat:
         for name in ("🔊 General VC", "🎮 Gaming VC", "🎵 Music VC"):
@@ -1111,14 +1331,14 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             if ch:
                 created.append(ch)
 
-    # --- ROLES ---
+    # ---------- 3.5 ROLES ----------
     cat = await safe(g.create_category("🎭 ROLES"))
     if cat:
-        ch = await safe(g.create_text_channel("🎭・roles", category=cat, overwrites=INFO_RO))
-        if ch:
-            created.append(ch)
+        roles_ch = await safe(g.create_text_channel(CFG.ROLES_CHANNEL, category=cat, overwrites=INFO_RO))
+        if roles_ch:
+            created.append(roles_ch)
 
-    # --- STAFF (created last so it sits at the very bottom) ---
+    # ---------- 3.6 STAFF ----------
     staff_cat = await safe(g.create_category("🛡️ STAFF", overwrites={
         g.default_role: discord.PermissionOverwrite(view_channel=False),
         member_role:    discord.PermissionOverwrite(view_channel=False),
@@ -1137,7 +1357,11 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         if logs_ch:
             created.append(logs_ch)
 
-    # ---------- 4. ENABLE COMMUNITY ----------
+    # ---------- 4. POST ROLES LIST IN #roles ----------
+    if roles_ch:
+        await post_roles_list(g, roles_ch)
+
+    # ---------- 5. ENABLE COMMUNITY ----------
     community_enabled = False
     community_error = ""
     if rules_ch and mod_ch:
@@ -1162,10 +1386,10 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     else:
         community_error = "rules or mod channel missing"
 
-    # ---------- 5. LOCK UNVERIFIED ----------
+    # ---------- 6. LOCK UNVERIFIED ----------
     await apply_unverified_lockdown(g)
 
-    # ---------- 6. MASS ASSIGN UNVERIFIED ----------
+    # ---------- 7. MASS ASSIGN UNVERIFIED ----------
     assigned = 0
     if u_role:
         async def assign(m):
@@ -1181,14 +1405,14 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
                 assigned += 1
         await asyncio.gather(*[assign(m) for m in g.members])
 
-    # ---------- 7. DROP VERIFY MESSAGE ----------
+    # ---------- 8. DROP VERIFY MESSAGE ----------
     if verify_ch:
         await send_verify_message(verify_ch, g, method=chosen)
 
     bot.add_view(VerifyView())
     bot.add_view(CaptchaStartView())
 
-    # ---------- 8. SUMMARY ----------
+    # ---------- 9. SUMMARY ----------
     embed = discord.Embed(
         title="✅ Basic Setup Complete",
         description=(
@@ -1196,7 +1420,8 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
             f"{('Reason: `' + community_error + '`') if community_error else ''}\n"
             f"**Rules**: {rules_ch.mention if rules_ch else '—'}\n"
             f"**Staff**: {mod_ch.mention if mod_ch else '—'}\n"
-            f"**Verify**: {verify_ch.mention if verify_ch else '—'}"
+            f"**Verify**: {verify_ch.mention if verify_ch else '—'}\n"
+            f"**Roles**: {roles_ch.mention if roles_ch else '—'}"
         ),
         color=discord.Color.green() if community_enabled else discord.Color.orange(),
         timestamp=now_utc(),
@@ -1717,6 +1942,7 @@ async def clearstrikes(interaction: discord.Interaction, member: discord.Member)
     app_commands.Choice(name="automember", value="automember"),
     app_commands.Choice(name="newaccount_warn", value="newaccount_warn"),
     app_commands.Choice(name="captcha_resend", value="captcha_resend"),
+    app_commands.Choice(name="verbose_logs", value="verbose_logs"),
 ])
 async def togglefeature(interaction: discord.Interaction, feature: app_commands.Choice[str]):
     global ANTIRAID_ENABLED
