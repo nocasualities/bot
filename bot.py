@@ -141,7 +141,6 @@ FEATURES = {
     "captcha_resend": True,
 }
 
-# strikes storage
 try:
     import json as _json
     with open(CFG.STRIKES_FILE, "r", encoding="utf-8") as _f:
@@ -1034,26 +1033,44 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
     except Exception:
         pass
 
+    # ---------- Overwrites ----------
+    # Everyone can view but not send
+    RO = discord.PermissionOverwrite(
+        view_channel=True, send_messages=False,
+        read_message_history=True, add_reactions=False,
+    )
+    # Staff-only: @everyone and Member cannot see; staff can write
+    STAFF_ONLY = {
+        g.default_role: discord.PermissionOverwrite(view_channel=False),
+        member_role:    discord.PermissionOverwrite(view_channel=False),
+        admin_role:     discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        mod_role:       discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        g.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    # Info-only: everyone sees, only staff writes
+    INFO_RO = {
+        g.default_role: RO,
+        member_role:    RO,
+        admin_role:     discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        mod_role:       discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        g.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+
     # ---------- 3. RULES + MOD CHANNELS FIRST (needed for Community) ----------
     rules_cat = await safe(g.create_category("📜 INFORMATION"))
     rules_ch = await safe(g.create_text_channel(
         "📜・rules", category=rules_cat,
         topic="Server rules and guidelines.",
-        overwrites={
-            g.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-        }
+        overwrites=INFO_RO,
     ))
 
-    staff_cat = await safe(g.create_category("🛡️ STAFF"))
-    staff_overwrites = {
+    staff_cat = await safe(g.create_category("🛡️ STAFF", overwrites={
         g.default_role: discord.PermissionOverwrite(view_channel=False),
-        admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-    }
+        member_role:    discord.PermissionOverwrite(view_channel=False),
+    }))
     mod_ch = await safe(g.create_text_channel(
         "💼・staff-chat", category=staff_cat,
-        overwrites=staff_overwrites,
+        overwrites=STAFF_ONLY,
         topic="Moderator-only channel.",
     ))
 
@@ -1085,49 +1102,61 @@ async def basicsetup(interaction: discord.Interaction, method: app_commands.Choi
         CFG.VERIFY_CHANNEL, category=verify_cat,
         overwrites={
             g.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-            v_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-            g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            v_role:         discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            g.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
         },
         topic="Verify to gain access to the server.",
     ))
 
     # ---------- 6. FULL STRUCTURE ----------
+    # mode: 'info' = only staff writes; 'chat' = everyone; 'staff' = staff only sees+writes
     structure = [
         ("📢 ANNOUNCEMENTS", [
-            ("📣・announcements", "text", True),
-            ("🎉・events", "text", True),
+            ("📣・announcements", "text", "info"),
+            ("🎉・events",        "text", "info"),
         ]),
         ("💬 GENERAL", [
-            ("💬・general-chat", "text", False),
-            ("🖼️・media", "text", False),
-            ("🤖・bot-commands", "text", False),
+            ("💬・general-chat",  "text", "chat"),
+            ("🖼️・media",         "text", "chat"),
+            ("🤖・bot-commands",  "text", "chat"),
         ]),
         ("🔊 VOICE", [
-            ("🔊 General VC", "voice", False),
-            ("🎮 Gaming VC", "voice", False),
-            ("🎵 Music VC", "voice", False),
+            ("🔊 General VC",     "voice", "chat"),
+            ("🎮 Gaming VC",      "voice", "chat"),
+            ("🎵 Music VC",       "voice", "chat"),
         ]),
         ("🎭 ROLES", [
-            ("🎭・roles", "text", True),
+            ("🎭・roles",         "text", "info"),
+        ]),
+        ("🛡️ STAFF", [
+            ("📋・staff-logs",    "text", "staff"),
+            ("💼・staff-chat",    "text", "staff"),
         ]),
     ]
 
     created = [c for c in [rules_ch, mod_ch, verify_ch] if c]
 
     for cat_name, chans in structure:
-        cat = await safe(g.create_category(cat_name))
+        if "STAFF" in cat_name:
+            cat = await safe(g.create_category(cat_name, overwrites={
+                g.default_role: discord.PermissionOverwrite(view_channel=False),
+                member_role:    discord.PermissionOverwrite(view_channel=False),
+            }))
+        else:
+            cat = await safe(g.create_category(cat_name))
         if not cat:
             continue
-        for ch_name, ch_type, read_only in chans:
+
+        for ch_name, ch_type, mode in chans:
             try:
                 if ch_type == "text":
-                    overwrites = {}
-                    if read_only:
-                        overwrites[g.default_role] = discord.PermissionOverwrite(
-                            view_channel=True, send_messages=False,
-                            read_message_history=True, add_reactions=False,
-                        )
-                    ch = await g.create_text_channel(ch_name, category=cat, overwrites=overwrites)
+                    if mode == "info":
+                        ow = INFO_RO
+                    elif mode == "staff":
+                        ow = STAFF_ONLY
+                    else:
+                        ow = {}
+                    ch = await g.create_text_channel(ch_name, category=cat, overwrites=ow)
                 else:
                     ch = await g.create_voice_channel(ch_name, category=cat)
                 created.append(ch)
